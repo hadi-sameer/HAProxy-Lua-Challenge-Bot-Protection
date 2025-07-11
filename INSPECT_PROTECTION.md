@@ -38,9 +38,10 @@ This HAProxy setup includes comprehensive browser inspect protection to prevent 
 - **Ctrl+Shift+C**: Chrome Elements Inspector
 - **F5/Ctrl+R**: Page Refresh
 
-#### Context Menu Protection
-- Disables right-click context menu
-- Prevents "Inspect Element" access
+#### Smart Context Menu Protection
+- **Allows normal right-click** for legitimate users
+- **Blocks right-click only when DevTools are detected**
+- Prevents "Inspect Element" access when DevTools are open
 
 #### Developer Tools Detection
 - **Window Size Monitoring**: Detects when devtools panel is opened
@@ -51,23 +52,23 @@ This HAProxy setup includes comprehensive browser inspect protection to prevent 
 - **Console Method Override**: Blocks `console.log`, `console.warn`, `console.error`
 - **Access Denied Response**: Shows blocking message when console is accessed
 
-#### Text Selection Prevention
-- Disables text selection across the entire page
-- Prevents copying of content
+#### Smart Text Selection Protection
+- **Allows normal text selection** for legitimate users
+- **Blocks text selection only when DevTools are detected**
+- Prevents copying when DevTools are open
 
-#### Drag and Drop Protection
-- Disables drag and drop functionality
-- Prevents image dragging
+#### Smart Drag and Drop Protection
+- **Allows normal drag and drop** for legitimate users
+- **Blocks drag and drop only when DevTools are detected**
+- Prevents image dragging when DevTools are open
 
 ### 3. CSS-based Protection
 
-#### User Selection Prevention
+#### Smart User Selection Protection
 ```css
 * {
-    -webkit-user-select: none !important;
-    -moz-user-select: none !important;
-    -ms-user-select: none !important;
-    user-select: none !important;
+    -webkit-touch-callout: none !important;
+    -webkit-tap-highlight-color: transparent !important;
 }
 ```
 
@@ -82,11 +83,10 @@ This HAProxy setup includes comprehensive browser inspect protection to prevent 
 }
 ```
 
-#### Image Protection
+#### Smart Image Protection
 ```css
 img {
-    -webkit-user-drag: none;
-    pointer-events: none;
+    pointer-events: auto;
 }
 ```
 
