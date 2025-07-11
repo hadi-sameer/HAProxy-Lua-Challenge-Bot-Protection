@@ -12,26 +12,33 @@ local SESSION_EXPIRY = 3600 -- 1 hour
 local REDIS_HOST = os.getenv("REDIS_HOST") or "127.0.0.1"
 local REDIS_PORT = tonumber(os.getenv("REDIS_PORT")) or 6379
 
--- Redis connection pool
-local redis_connections = {}
-local max_connections = 10
-local connection_index = 0
-
--- Get Redis connection
+-- Thread-safe Redis connection function
 local function get_redis_connection()
-    connection_index = (connection_index % max_connections) + 1
-    
-    if not redis_connections[connection_index] then
-        -- Create new Redis connection
-        local redis = core.tcp()
-        local ok, err = redis:connect(REDIS_HOST, REDIS_PORT)
-        if not ok then
-            return nil
-        end
-        redis_connections[connection_index] = redis
+    local redis = core.tcp()
+    local ok, err = redis:connect(REDIS_HOST, REDIS_PORT)
+    if not ok then
+        return nil
+    end
+    return redis
+end
+
+-- Safe Redis operation wrapper
+local function safe_redis_operation(operation)
+    local redis = get_redis_connection()
+    if not redis then
+        return nil
     end
     
-    return redis_connections[connection_index]
+    local success, result = pcall(operation, redis)
+    
+    -- Always close the connection
+    pcall(function() redis:close() end)
+    
+    if success then
+        return result
+    else
+        return nil
+    end
 end
 
 -- Utility functions
@@ -53,76 +60,76 @@ local function generate_uuid()
     end)
 end
 
--- Redis operations
+-- Redis operations with thread-safe connections
 local function redis_set(key, value, expiry)
-    local redis = get_redis_connection()
-    if not redis then 
-        return false 
-    end
-    
-    -- Use RESP protocol format: *3\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n
-    local key_len = string.len(key)
-    local value_len = string.len(value)
-    local cmd = string.format("*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", key_len, key, value_len, value)
-    
-    if expiry then
-        -- Add EX command: *5\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n$2\r\nEX\r\n$<expirylen>\r\n<expiry>\r\n
-        local expiry_str = tostring(expiry)
-        local expiry_len = string.len(expiry_str)
-        cmd = string.format("*5\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$2\r\nEX\r\n$%d\r\n%s\r\n", 
-                           key_len, key, value_len, value, expiry_len, expiry_str)
-    end
-    
-    local ok, err = redis:send(cmd)
-    if not ok then 
-        return false 
-    end
-    
-    local response = redis:receive()
-    return response and response:match("^%+OK") ~= nil
+    return safe_redis_operation(function(redis)
+        -- Use RESP protocol format: *3\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n
+        local key_len = string.len(key)
+        local value_len = string.len(value)
+        local cmd = string.format("*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", key_len, key, value_len, value)
+        
+        if expiry then
+            -- Add EX command: *5\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n$2\r\nEX\r\n$<expirylen>\r\n<expiry>\r\n
+            local expiry_str = tostring(expiry)
+            local expiry_len = string.len(expiry_str)
+            cmd = string.format("*5\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$2\r\nEX\r\n$%d\r\n%s\r\n", 
+                               key_len, key, value_len, value, expiry_len, expiry_str)
+        end
+        
+        local ok, err = redis:send(cmd)
+        if not ok then 
+            return false 
+        end
+        
+        local response = redis:receive()
+        return response and response:match("^%+OK") ~= nil
+    end)
 end
 
 local function redis_get(key)
-    local redis = get_redis_connection()
-    if not redis then return nil end
-    
-    -- Use RESP protocol format: *2\r\n$3\r\nGET\r\n$<keylen>\r\n<key>\r\n
-    local key_len = string.len(key)
-    local cmd = string.format("*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n", key_len, key)
-    
-    local ok, err = redis:send(cmd)
-    if not ok then return nil end
-    
-    local response = redis:receive()
-    if response and response:match("^%$%-1") then
-        return nil -- Key not found
-    end
-    
-    -- Parse the response: $<len>\r\n<value>\r\n
-    if response and response:match("^%$%d+") then
-        local len_str = response:match("^%$(%d+)")
-        local len = tonumber(len_str)
-        if len and len > 0 then
-            return redis:receive(len)
+    return safe_redis_operation(function(redis)
+        -- Use RESP protocol format: *2\r\n$3\r\nGET\r\n$<keylen>\r\n<key>\r\n
+        local key_len = string.len(key)
+        local cmd = string.format("*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n", key_len, key)
+        
+        local ok, err = redis:send(cmd)
+        if not ok then 
+            return nil 
         end
-    end
-    
-    return nil
+        
+        local response = redis:receive()
+        if response and response:match("^%$%-1") then
+            return nil -- Key not found
+        end
+        
+        -- Parse the response: $<len>\r\n<value>\r\n
+        if response and response:match("^%$%d+") then
+            local len_str = response:match("^%$(%d+)")
+            local len = tonumber(len_str)
+            if len and len > 0 then
+                local value = redis:receive(len)
+                return value
+            end
+        end
+        
+        return nil
+    end)
 end
 
 local function redis_del(key)
-    local redis = get_redis_connection()
-    if not redis then return false end
-    
-    -- Use RESP protocol format: *2\r\n$3\r\nDEL\r\n$<keylen>\r\n<key>\r\n
-    local key_len = string.len(key)
-    local cmd = string.format("*2\r\n$3\r\nDEL\r\n$%d\r\n%s\r\n", key_len, key)
-    
-    local ok, err = redis:send(cmd)
-    if not ok then return false end
-    
-    local response = redis:receive()
-    return response and response:match("^%:1") ~= nil
+    return safe_redis_operation(function(redis)
+        -- Use RESP protocol format: *2\r\n$3\r\nDEL\r\n$<keylen>\r\n<key>\r\n
+        local key_len = string.len(key)
+        local cmd = string.format("*2\r\n$3\r\nDEL\r\n$%d\r\n%s\r\n", key_len, key)
+        
+        local ok, err = redis:send(cmd)
+        if not ok then 
+            return false 
+        end
+        
+        local response = redis:receive()
+        return response and response:match("^%:1") ~= nil
+    end)
 end
 
 -- Challenge management
@@ -315,43 +322,25 @@ core.register_service("api_service", "http", function(applet)
             applet:start_response()
             applet:send(json.encode({
                 success = false,
-                error = result.error,
-                hash = result.hash,
-                expected_prefix = result.expected_prefix
+                error = result.error or "Invalid solution"
             }))
         end
         return
     end
     
-    -- Default 404 for unknown API endpoints
+    -- Default response for unknown endpoints
     applet:set_status(404)
     applet:add_header("Content-Type", "application/json")
     applet:start_response()
-    applet:send(json.encode({error = "API endpoint not found"}))
+    applet:send(json.encode({error = "Endpoint not found"}))
 end)
 
 -- Session validation action for HAProxy
-core.register_action("validate_session_action", {"http-req"}, function(txn)
+core.register_action("validate_session_action", { "http-req" }, function(txn)
     local headers = txn.http:req_get_headers()
     local cookies = headers["cookie"] and headers["cookie"][0] or headers["Cookie"] and headers["Cookie"][0] or ""
     local session_token = string.match(cookies, "js_challenge_session=([^;]*)")
     
-    if not validate_session(session_token) then
-        txn:set_var("req.session_valid", "0")
-    else
-        txn:set_var("req.session_valid", "1")
-    end
-end)
-
--- Cleanup function for Redis connections
-core.register_task(function()
-    while true do
-        core.sleep(300) -- Clean every 5 minutes
-        for i, redis in pairs(redis_connections) do
-            if redis then
-                redis:close()
-                redis_connections[i] = nil
-            end
-        end
-    end
+    local is_valid = validate_session(session_token)
+    txn:set_var("req.session_valid", is_valid and "1" or "0")
 end) 
