@@ -17,6 +17,54 @@
             -webkit-tap-highlight-color: transparent;
         }
         
+        /* Inspect Protection CSS */
+        * {
+            -webkit-user-select: none !important;
+            -moz-user-select: none !important;
+            -ms-user-select: none !important;
+            user-select: none !important;
+            -webkit-touch-callout: none !important;
+            -webkit-tap-highlight-color: transparent !important;
+        }
+        
+        /* Hide elements when devtools are open */
+        @media screen and (max-width: 100px) {
+            body * {
+                display: none !important;
+            }
+            body::after {
+                content: "Access Denied - Developer tools detected";
+                display: block !important;
+                text-align: center;
+                padding: 50px;
+                font-family: Arial, sans-serif;
+            }
+        }
+        
+        /* Hide scrollbars when devtools are open */
+        @media screen and (max-height: 100px) {
+            body * {
+                display: none !important;
+            }
+            body::after {
+                content: "Access Denied - Developer tools detected";
+                display: block !important;
+                text-align: center;
+                padding: 50px;
+                font-family: Arial, sans-serif;
+            }
+        }
+        
+        /* Disable images drag */
+        img {
+            -webkit-user-drag: none;
+            -khtml-user-drag: none;
+            -moz-user-drag: none;
+            -o-user-drag: none;
+            user-drag: none;
+            pointer-events: none;
+        }
+        
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #1a1a2e, #16213e, #0f3460);
@@ -214,6 +262,105 @@
     
     <script src='https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js'></script>
     <script>
+        // Inspect Protection - Prevent developer tools access
+        (function() {
+            'use strict';
+            
+            // Disable right-click context menu
+            document.addEventListener('contextmenu', function(e) {
+                e.preventDefault();
+                return false;
+            });
+            
+            // Disable keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                // F12 key
+                if (e.keyCode === 123) {
+                    e.preventDefault();
+                    return false;
+                }
+                
+                // Ctrl+Shift+I (Chrome DevTools)
+                if (e.ctrlKey && e.shiftKey && e.keyCode === 73) {
+                    e.preventDefault();
+                    return false;
+                }
+                
+                // Ctrl+Shift+J (Chrome Console)
+                if (e.ctrlKey && e.shiftKey && e.keyCode === 74) {
+                    e.preventDefault();
+                    return false;
+                }
+                
+                // Ctrl+U (View Source)
+                if (e.ctrlKey && e.keyCode === 85) {
+                    e.preventDefault();
+                    return false;
+                }
+                
+                // Ctrl+Shift+C (Chrome Elements)
+                if (e.ctrlKey && e.shiftKey && e.keyCode === 67) {
+                    e.preventDefault();
+                    return false;
+                }
+                
+                // F5 and Ctrl+R (Refresh)
+                if (e.keyCode === 116 || (e.ctrlKey && e.keyCode === 82)) {
+                    e.preventDefault();
+                    return false;
+                }
+            });
+            
+            // Detect developer tools
+            function detectDevTools() {
+                const threshold = 160;
+                const widthThreshold = window.outerWidth - window.innerWidth > threshold;
+                const heightThreshold = window.outerHeight - window.innerHeight > threshold;
+                
+                if (widthThreshold || heightThreshold) {
+                    document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Developer tools are not allowed on this site.</p></div>';
+                    return true;
+                }
+                return false;
+            }
+            
+            // Continuous monitoring
+            setInterval(detectDevTools, 1000);
+            
+            // Console detection
+            const originalLog = console.log;
+            const originalWarn = console.warn;
+            const originalError = console.error;
+            
+            console.log = function() {
+                document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
+                return originalLog.apply(console, arguments);
+            };
+            
+            console.warn = function() {
+                document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
+                return originalWarn.apply(console, arguments);
+            };
+            
+            console.error = function() {
+                document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
+                return originalError.apply(console, arguments);
+            };
+            
+            // Disable text selection
+            document.addEventListener('selectstart', function(e) {
+                e.preventDefault();
+                return false;
+            });
+            
+            // Disable drag and drop
+            document.addEventListener('dragstart', function(e) {
+                e.preventDefault();
+                return false;
+            });
+            
+        })();
+        
         let challenge, attempts = 0, startTime, isVerifying = false;
         
         function startVerification() {

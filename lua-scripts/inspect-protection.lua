@@ -112,7 +112,8 @@ end
 -- Main inspection protection function
 local function inspect_protection_action(txn)
     if not INSPECT_BLOCK_ENABLED then
-        return false
+        txn:set_var("req.inspect_blocked", "0")
+        return
     end
     
     local client_ip = txn.sf and txn.sf:src() or "unknown"
@@ -124,30 +125,33 @@ local function inspect_protection_action(txn)
     local detected, reason = detect_devtools_headers(headers)
     if detected then
         log_detection(client_ip, user_agent, reason, headers)
-        return true -- Block the request
+        txn:set_var("req.inspect_blocked", "1")
+        return
     end
     
     -- Check user agent for developer tools
     detected, reason = detect_devtools_user_agent(user_agent)
     if detected then
         log_detection(client_ip, user_agent, reason, headers)
-        return true -- Block the request
+        txn:set_var("req.inspect_blocked", "1")
+        return
     end
     
     -- Check for suspicious requests
     detected, reason = detect_suspicious_requests(headers, path)
     if detected then
         log_detection(client_ip, user_agent, reason, headers)
-        return true -- Block the request
+        txn:set_var("req.inspect_blocked", "1")
+        return
     end
     
-    return false -- Allow the request
+    txn:set_var("req.inspect_blocked", "0")
 end
 
 -- Register the action and fetch method
 core.register_action("inspect_protection", { "http-req" }, inspect_protection_action, 0)
 core.register_fetches("inspect_protection", function(txn)
-    return inspect_protection_action(txn) and "1" or "0"
+    return txn:get_var("req.inspect_blocked") or "0"
 end)
 
 -- Function to inject protection JavaScript
