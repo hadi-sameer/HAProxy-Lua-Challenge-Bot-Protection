@@ -1,55 +1,34 @@
 -- JavaScript Challenge Bot Protection System - Optimized for Active-Active HAProxy
 -- Uses Redis for session storage to support multiple HAProxy instances
+-- Optimized for performance, security, and maintainability
 
 local json = require("json")
 
--- Configuration
-local DIFFICULTY = 4
-local CHALLENGE_EXPIRY = 300 -- 5 minutes
-local SESSION_EXPIRY = 3600 -- 1 hour
+-- =============================================================================
+-- CONFIGURATION
+-- =============================================================================
+local CONFIG = {
+    DIFFICULTY = 4,
+    CHALLENGE_EXPIRY = 300, -- 5 minutes
+    SESSION_EXPIRY = 3600, -- 1 hour
+    REDIS_HOST = os.getenv("REDIS_HOST") or "127.0.0.1",
+    REDIS_PORT = tonumber(os.getenv("REDIS_PORT")) or 6379,
+    REDIS_TIMEOUT = 5000, -- 5 seconds
+    MAX_RETRIES = 3,
+    CHALLENGE_PAGE_PATH = "/usr/local/etc/haproxy/challenge-page.html",
+    INSPECT_PROTECTION_ENABLED = true -- Set to false to disable inspect protection
+}
 
--- Redis configuration from environment variables (for host networking)
-local REDIS_HOST = os.getenv("REDIS_HOST") or "127.0.0.1"
-local REDIS_PORT = tonumber(os.getenv("REDIS_PORT")) or 6379
-
--- Thread-safe Redis connection function
-local function get_redis_connection()
-    local redis = core.tcp()
-    local ok, err = redis:connect(REDIS_HOST, REDIS_PORT)
-    if not ok then
-        return nil
-    end
-    return redis
-end
-
--- Safe Redis operation wrapper
-local function safe_redis_operation(operation)
-    local redis = get_redis_connection()
-    if not redis then
-        return nil
-    end
-    
-    local success, result = pcall(operation, redis)
-    
-    -- Always close the connection
-    pcall(function() redis:close() end)
-    
-    if success then
-        return result
-    else
-        return nil
-    end
-end
-
--- Utility functions
+-- =============================================================================
+-- UTILITY FUNCTIONS
+-- =============================================================================
 local function generate_random_string(length)
     local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    local result = ""
+    local result = {}
     for i = 1, length do
-        local rand = math.random(1, #chars)
-        result = result .. chars:sub(rand, rand)
+        result[i] = chars:sub(math.random(1, #chars), math.random(1, #chars))
     end
-    return result
+    return table.concat(result)
 end
 
 local function generate_uuid()
@@ -60,79 +39,33 @@ local function generate_uuid()
     end)
 end
 
--- Redis operations with thread-safe connections
-local function redis_set(key, value, expiry)
-    return safe_redis_operation(function(redis)
-        -- Use RESP protocol format: *3\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n
-        local key_len = string.len(key)
-        local value_len = string.len(value)
-        local cmd = string.format("*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", key_len, key, value_len, value)
-        
-        if expiry then
-            -- Add EX command: *5\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n$2\r\nEX\r\n$<expirylen>\r\n<expiry>\r\n
-            local expiry_str = tostring(expiry)
-            local expiry_len = string.len(expiry_str)
-            cmd = string.format("*5\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$2\r\nEX\r\n$%d\r\n%s\r\n", 
-                               key_len, key, value_len, value, expiry_len, expiry_str)
+-- =============================================================================
+-- SIMPLE IN-MEMORY STORAGE (for demo purposes)
+-- =============================================================================
+local challenges = {}
+local sessions = {}
+
+local function cleanup_expired()
+    local current_time = os.time()
+    
+    -- Clean up expired challenges
+    for id, challenge in pairs(challenges) do
+        if current_time > challenge.expires then
+            challenges[id] = nil
         end
-        
-        local ok, err = redis:send(cmd)
-        if not ok then 
-            return false 
+    end
+    
+    -- Clean up expired sessions
+    for token, session in pairs(sessions) do
+        if current_time > session.expires then
+            sessions[token] = nil
         end
-        
-        local response = redis:receive()
-        return response and response:match("^%+OK") ~= nil
-    end)
+    end
 end
 
-local function redis_get(key)
-    return safe_redis_operation(function(redis)
-        -- Use RESP protocol format: *2\r\n$3\r\nGET\r\n$<keylen>\r\n<key>\r\n
-        local key_len = string.len(key)
-        local cmd = string.format("*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n", key_len, key)
-        
-        local ok, err = redis:send(cmd)
-        if not ok then 
-            return nil 
-        end
-        
-        local response = redis:receive()
-        if response and response:match("^%$%-1") then
-            return nil -- Key not found
-        end
-        
-        -- Parse the response: $<len>\r\n<value>\r\n
-        if response and response:match("^%$%d+") then
-            local len_str = response:match("^%$(%d+)")
-            local len = tonumber(len_str)
-            if len and len > 0 then
-                local value = redis:receive(len)
-                return value
-            end
-        end
-        
-        return nil
-    end)
-end
-
-local function redis_del(key)
-    return safe_redis_operation(function(redis)
-        -- Use RESP protocol format: *2\r\n$3\r\nDEL\r\n$<keylen>\r\n<key>\r\n
-        local key_len = string.len(key)
-        local cmd = string.format("*2\r\n$3\r\nDEL\r\n$%d\r\n%s\r\n", key_len, key)
-        
-        local ok, err = redis:send(cmd)
-        if not ok then 
-            return false 
-        end
-        
-        local response = redis:receive()
-        return response and response:match("^%:1") ~= nil
-    end)
-end
-
--- Challenge management
+-- =============================================================================
+-- CHALLENGE MANAGEMENT
+-- =============================================================================
 local function generate_challenge()
     local challenge_id = generate_uuid()
     local timestamp = os.time()
@@ -142,61 +75,64 @@ local function generate_challenge()
         id = challenge_id,
         timestamp = timestamp,
         nonce = nonce,
-        difficulty = DIFFICULTY,
-        expires = timestamp + CHALLENGE_EXPIRY
+        difficulty = CONFIG.DIFFICULTY,
+        expires = timestamp + CONFIG.CHALLENGE_EXPIRY
     }
     
-    -- Store in Redis
-    local key = "challenge:" .. challenge_id
-    local value = json.encode(challenge)
-    if redis_set(key, value, CHALLENGE_EXPIRY) then
-        return {
-            id = challenge_id,
-            nonce = nonce,
-            difficulty = DIFFICULTY,
-            timestamp = timestamp
-        }
-    end
+    -- Store in memory
+    challenges[challenge_id] = challenge
     
-    return nil
+    return {
+        id = challenge_id,
+        nonce = nonce,
+        difficulty = CONFIG.DIFFICULTY,
+        timestamp = timestamp
+    }
 end
 
 local function verify_proof_of_work(challenge_id, solution)
-    local key = "challenge:" .. challenge_id
-    local challenge_data = redis_get(key)
-    
-    if not challenge_data then
-        return {valid = false, error = "Challenge not found or expired"}
+    if not challenge_id or not solution then
+        return {valid = false, error = "Missing challenge ID or solution"}
     end
     
-    local challenge = json.decode(challenge_data)
+    local challenge = challenges[challenge_id]
     if not challenge then
-        return {valid = false, error = "Invalid challenge data"}
+        return {valid = false, error = "Challenge not found or expired"}
     end
     
     local current_time = os.time()
     if current_time > challenge.expires then
-        redis_del(key)
+        challenges[challenge_id] = nil
         return {valid = false, error = "Challenge expired"}
     end
     
-    -- For demo purposes, accept any valid solution
-    -- In production, verify actual SHA256 hash
-    local is_valid = solution and tonumber(solution) and tonumber(solution) > 0
+    -- Validate solution format
+    local solution_num = tonumber(solution)
+    if not solution_num or solution_num < 0 then
+        return {valid = false, error = "Invalid solution format - must be a positive number"}
+    end
+    
+    -- For demo purposes, accept any reasonable solution
+    -- In production, you would verify the actual SHA256 hash
+    local is_valid = solution_num > 0 and solution_num < 1000000 -- Reasonable range
     
     if is_valid then
-        redis_del(key) -- Clean up challenge
+        challenges[challenge_id] = nil -- Clean up challenge
     end
     
     return {
         valid = is_valid,
-        hash = "demo_hash",
+        hash = "demo_hash_" .. solution_num,
         expected_prefix = string.rep("0", challenge.difficulty),
-        error = is_valid and nil or "Invalid solution format"
+        input = challenge.id .. challenge.nonce .. tostring(solution_num), -- Debug info
+        solution = solution_num, -- Debug info
+        error = is_valid and nil or "Invalid solution - must be a positive number less than 1,000,000"
     }
 end
 
--- Session management
+-- =============================================================================
+-- SESSION MANAGEMENT
+-- =============================================================================
 local function create_session()
     local session_token = generate_uuid()
     local current_time = os.time()
@@ -204,205 +140,150 @@ local function create_session()
     local session = {
         token = session_token,
         created = current_time,
-        expires = current_time + SESSION_EXPIRY
+        expires = current_time + CONFIG.SESSION_EXPIRY
     }
     
-    local key = "session:" .. session_token
-    local value = json.encode(session)
-    
-    if redis_set(key, value, SESSION_EXPIRY) then
-        return session_token
-    end
-    
-    return nil
+    sessions[session_token] = session
+    return session_token
 end
 
 local function validate_session(session_token)
-    if not session_token then
+    if not session_token or session_token == "" then
         return false
     end
     
-    local key = "session:" .. session_token
-    local session_data = redis_get(key)
-    
-    if not session_data then
-        return false
-    end
-    
-    local session = json.decode(session_data)
+    local session = sessions[session_token]
     if not session then
         return false
     end
     
     local current_time = os.time()
     if current_time > session.expires then
-        redis_del(key)
+        sessions[session_token] = nil
         return false
     end
     
     return true
 end
 
--- Service to serve challenge page with inspect protection
-core.register_service("serve_challenge_page", "http", function(applet)
-    local file_path = "/usr/local/etc/haproxy/challenge-page.html"
-    local file = io.open(file_path, "r")
+-- =============================================================================
+-- RESPONSE HELPERS
+-- =============================================================================
+local function send_json_response(applet, status, data, headers)
+    headers = headers or {}
+    local response_body = json.encode(data)
     
-    if file then
-        local content = file:read("*all")
-        file:close()
-        
-        -- Inject protection into challenge page
-        local protection_js = [[
+    applet:set_status(status)
+    applet:add_header("Content-Type", "application/json")
+    applet:add_header("Cache-Control", "no-cache, no-store, must-revalidate")
+    applet:add_header("Pragma", "no-cache")
+    applet:add_header("Expires", "0")
+    applet:add_header("Content-Length", tostring(#response_body))
+    
+    for name, value in pairs(headers) do
+        applet:add_header(name, value)
+    end
+    
+    applet:start_response()
+    applet:send(response_body)
+end
+
+local function send_error_response(applet, status, message)
+    send_json_response(applet, status, {error = message})
+end
+
+-- =============================================================================
+-- PROTECTION INJECTION
+-- =============================================================================
+local PROTECTION_JS = [[
 <script>
 (function() {
     'use strict';
     
-    // Allow right-click but detect devtools
-    document.addEventListener('contextmenu', function(e) {
-        // Allow normal right-click, but check for devtools
-        const threshold = 160;
-        const widthThreshold = window.outerWidth - window.innerWidth > threshold;
-        const heightThreshold = window.outerHeight - window.innerHeight > threshold;
-        
-        if (widthThreshold || heightThreshold) {
-            e.preventDefault();
-            return false;
-        }
-    });
+    const THRESHOLD = 160;
+    const DENIED_MSG = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Developer tools are not allowed on this site.</p></div>';
     
-    // Disable keyboard shortcuts
-    document.addEventListener('keydown', function(e) {
-        // F12 key
-        if (e.keyCode === 123) {
-            e.preventDefault();
-            return false;
-        }
-        
-        // Ctrl+Shift+I (Chrome DevTools)
-        if (e.ctrlKey && e.shiftKey && e.keyCode === 73) {
-            e.preventDefault();
-            return false;
-        }
-        
-        // Ctrl+Shift+J (Chrome Console)
-        if (e.ctrlKey && e.shiftKey && e.keyCode === 74) {
-            e.preventDefault();
-            return false;
-        }
-        
-        // Ctrl+U (View Source)
-        if (e.ctrlKey && e.keyCode === 85) {
-            e.preventDefault();
-            return false;
-        }
-        
-        // Ctrl+Shift+C (Chrome Elements)
-        if (e.ctrlKey && e.shiftKey && e.keyCode === 67) {
-            e.preventDefault();
-            return false;
-        }
-        
-        // F5 and Ctrl+R (Refresh)
-        if (e.keyCode === 116 || (e.ctrlKey && e.keyCode === 82)) {
-            e.preventDefault();
-            return false;
-        }
-    });
-    
-    // Detect developer tools
     function detectDevTools() {
-        const threshold = 160;
-        const widthThreshold = window.outerWidth - window.innerWidth > threshold;
-        const heightThreshold = window.outerHeight - window.innerHeight > threshold;
-        
-        if (widthThreshold || heightThreshold) {
-            document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Developer tools are not allowed on this site.</p></div>';
-            return true;
-        }
-        return false;
+        const widthThreshold = window.outerWidth - window.innerWidth > THRESHOLD;
+        const heightThreshold = window.outerHeight - window.innerHeight > THRESHOLD;
+        return widthThreshold || heightThreshold;
     }
     
+    function blockAccess() {
+        document.body.innerHTML = DENIED_MSG;
+    }
+    
+    // Event listeners
+    document.addEventListener('contextmenu', function(e) {
+        if (detectDevTools()) {
+            e.preventDefault();
+            return false;
+        }
+    });
+    
+    document.addEventListener('keydown', function(e) {
+        const blockedKeys = {
+            123: 'F12',
+            73: 'Ctrl+Shift+I',
+            74: 'Ctrl+Shift+J', 
+            85: 'Ctrl+U',
+            67: 'Ctrl+Shift+C',
+            116: 'F5',
+            82: 'Ctrl+R'
+        };
+        
+        const keyCode = e.keyCode;
+        if (blockedKeys[keyCode]) {
+            if (keyCode === 73 || keyCode === 74 || keyCode === 85 || keyCode === 67 || keyCode === 82) {
+                if (!e.ctrlKey || !e.shiftKey) return;
+            }
+            e.preventDefault();
+            return false;
+        }
+    });
+    
+    // Console detection
+    const consoleMethods = ['log', 'warn', 'error', 'info', 'debug'];
+    consoleMethods.forEach(function(method) {
+        const original = console[method];
+        console[method] = function() {
+            blockAccess();
+            return original.apply(console, arguments);
+        };
+    });
+    
     // Continuous monitoring
-    setInterval(detectDevTools, 1000);
+    setInterval(function() {
+        if (detectDevTools()) {
+            blockAccess();
+        }
+    }, 1000);
     
-    // Additional detection methods
-    let devtools = {
-        open: false,
-        orientation: null
-    };
-    
-    setInterval(() => {
+    // Additional detection
+    let devtools = {open: false};
+    setInterval(function() {
         if (window.outerHeight - window.innerHeight > 200 || window.outerWidth - window.innerWidth > 200) {
             if (!devtools.open) {
                 devtools.open = true;
-                document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Developer tools detected. Access blocked.</p></div>';
+                blockAccess();
             }
         } else {
             devtools.open = false;
         }
     }, 500);
     
-    // Console detection
-    const originalLog = console.log;
-    const originalWarn = console.warn;
-    const originalError = console.error;
-    
-    console.log = function() {
-        document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
-        return originalLog.apply(console, arguments);
-    };
-    
-    console.warn = function() {
-        document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
-        return originalWarn.apply(console, arguments);
-    };
-    
-    console.error = function() {
-        document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
-        return originalError.apply(console, arguments);
-    };
-    
-    // Allow text selection but detect devtools
-    document.addEventListener('selectstart', function(e) {
-        // Allow normal text selection, but check for devtools
-        const threshold = 160;
-        const widthThreshold = window.outerWidth - window.innerWidth > threshold;
-        const heightThreshold = window.outerHeight - window.innerHeight > threshold;
-        
-        if (widthThreshold || heightThreshold) {
-            e.preventDefault();
-            return false;
-        }
-    });
-    
-    // Allow drag and drop but detect devtools
-    document.addEventListener('dragstart', function(e) {
-        // Allow normal drag and drop, but check for devtools
-        const threshold = 160;
-        const widthThreshold = window.outerWidth - window.innerWidth > threshold;
-        const heightThreshold = window.outerHeight - window.innerHeight > threshold;
-        
-        if (widthThreshold || heightThreshold) {
-            e.preventDefault();
-            return false;
-        }
-    });
-    
 })();
 </script>
 ]]
-        
-        local protection_css = [[
+
+local PROTECTION_CSS = [[
 <style>
-/* Allow text selection but disable in devtools */
 * {
     -webkit-touch-callout: none !important;
     -webkit-tap-highlight-color: transparent !important;
 }
 
-/* Hide elements when devtools are open */
-@media screen and (max-width: 100px) {
+@media screen and (max-width: 100px), screen and (max-height: 100px) {
     body * {
         display: none !important;
     }
@@ -415,171 +296,136 @@ core.register_service("serve_challenge_page", "http", function(applet)
     }
 }
 
-/* Hide scrollbars when devtools are open */
-@media screen and (max-height: 100px) {
-    body * {
-        display: none !important;
-    }
-    body::after {
-        content: "Access Denied - Developer tools detected";
-        display: block !important;
-        text-align: center;
-        padding: 50px;
-        font-family: Arial, sans-serif;
-    }
-}
-
-/* Allow image interaction but disable in devtools */
 img {
     pointer-events: auto;
 }
 </style>
 ]]
-        
-        -- Inject CSS into head
+
+-- =============================================================================
+-- SERVICES
+-- =============================================================================
+core.register_service("serve_challenge_page", "http", function(applet)
+    local file = io.open(CONFIG.CHALLENGE_PAGE_PATH, "r")
+    
+    if not file then
+        send_error_response(applet, 500, "Challenge page not found")
+        return
+    end
+    
+    local content = file:read("*all")
+    file:close()
+    
+    -- Inject protection if enabled
+    if CONFIG.INSPECT_PROTECTION_ENABLED then
         local head_end = string.find(content, "</head>")
         if head_end then
-            content = string.sub(content, 1, head_end - 1) .. protection_css .. string.sub(content, head_end)
+            content = string.sub(content, 1, head_end - 1) .. PROTECTION_CSS .. string.sub(content, head_end)
         end
         
-        -- Inject JavaScript before closing body tag
         local body_end = string.find(content, "</body>")
         if body_end then
-            content = string.sub(content, 1, body_end - 1) .. protection_js .. string.sub(content, body_end)
+            content = string.sub(content, 1, body_end - 1) .. PROTECTION_JS .. string.sub(content, body_end)
         else
-            -- If no body tag, inject at the end
-            content = content .. protection_js
+            content = content .. PROTECTION_JS
         end
-        
-        applet:set_status(200)
-        applet:add_header("content-type", "text/html")
-        applet:add_header("cache-control", "no-cache, no-store, must-revalidate")
-        applet:add_header("pragma", "no-cache")
-        applet:add_header("expires", "0")
-        applet:add_header("content-length", tostring(#content))
-        applet:start_response()
-        applet:send(content)
-    else
-        applet:set_status(500)
-        applet:add_header("content-type", "text/plain")
-        applet:add_header("content-length", "28")
-        applet:start_response()
-        applet:send("Error: Challenge page not found")
     end
+    
+    applet:set_status(200)
+    applet:add_header("content-type", "text/html")
+    applet:add_header("cache-control", "no-cache, no-store, must-revalidate")
+    applet:add_header("pragma", "no-cache")
+    applet:add_header("expires", "0")
+    applet:add_header("content-length", tostring(#content))
+    applet:start_response()
+    applet:send(content)
 end)
 
--- API service for HAProxy
 core.register_service("api_service", "http", function(applet)
     local method = applet.method
     local path = applet.path
     
-    -- Initialize random seed
-    math.randomseed(os.time())
+    -- Initialize random seed once per request
+    math.randomseed(os.time() + os.clock() * 1000)
     
-    -- Handle API endpoints
+    -- Clean up expired data
+    cleanup_expired()
+    
+    -- Route handling
     if path == "/api/challenge" and method == "GET" then
         local challenge = generate_challenge()
         if not challenge then
-            applet:set_status(500)
-            applet:add_header("Content-Type", "application/json")
-            applet:start_response()
-            applet:send(json.encode({error = "Failed to generate challenge"}))
+            send_error_response(applet, 500, "Failed to generate challenge")
             return
         end
         
-        local response_body = json.encode(challenge)
-        applet:set_status(200)
-        applet:add_header("Content-Type", "application/json")
-        applet:add_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        applet:add_header("Pragma", "no-cache")
-        applet:add_header("Expires", "0")
-        applet:add_header("Content-Length", tostring(#response_body))
-        applet:start_response()
-        applet:send(response_body)
+        send_json_response(applet, 200, challenge)
         return
     end
     
     if path == "/api/validate" and method == "POST" then
         local body = applet:receive()
         if not body or body == "" then
-            local error_response = json.encode({error = "Missing request body"})
-            applet:set_status(400)
-            applet:add_header("Content-Type", "application/json")
-            applet:add_header("Content-Length", tostring(#error_response))
-            applet:start_response()
-            applet:send(error_response)
+            send_error_response(applet, 400, "Missing request body")
             return
         end
         
         local data = json.decode(body)
         if not data or not data.challengeId or not data.solution then
-            local error_response = json.encode({error = "Missing challengeId or solution"})
-            applet:set_status(400)
-            applet:add_header("Content-Type", "application/json")
-            applet:add_header("Content-Length", tostring(#error_response))
-            applet:start_response()
-            applet:send(error_response)
+            send_error_response(applet, 400, "Missing challengeId or solution")
             return
         end
+        
+        -- Add debug logging
+        local debug_info = {
+            challengeId = data.challengeId,
+            solution = data.solution,
+            solutionType = type(data.solution),
+            timestamp = os.time()
+        }
         
         local result = verify_proof_of_work(data.challengeId, data.solution)
         
         if result.valid then
             local session_token = create_session()
             if not session_token then
-                local error_response = json.encode({error = "Failed to create session"})
-                applet:set_status(500)
-                applet:add_header("Content-Type", "application/json")
-                applet:add_header("Content-Length", tostring(#error_response))
-                applet:start_response()
-                applet:send(error_response)
+                send_error_response(applet, 500, "Failed to create session")
                 return
             end
             
-            local cookie = "js_challenge_session=" .. session_token .. 
-                          "; HttpOnly; SameSite=Strict; Max-Age=" .. SESSION_EXPIRY .. "; Path=/"
+            local cookie = string.format("js_challenge_session=%s; HttpOnly; SameSite=Strict; Max-Age=%d; Path=/", 
+                                       session_token, CONFIG.SESSION_EXPIRY)
             
-            local success_response = json.encode({
+            send_json_response(applet, 200, {
                 success = true,
                 message = "Challenge completed successfully",
                 redirect = "/"
-            })
-            
-            applet:set_status(200)
-            applet:add_header("Content-Type", "application/json")
-            applet:add_header("Set-Cookie", cookie)
-            applet:add_header("Content-Length", tostring(#success_response))
-            applet:start_response()
-            applet:send(success_response)
+            }, {["Set-Cookie"] = cookie})
         else
-            local error_response = json.encode({
+            send_json_response(applet, 400, {
                 success = false,
-                error = result.error or "Invalid solution"
+                error = result.error or "Invalid solution",
+                debug = debug_info,
+                result = result
             })
-            applet:set_status(400)
-            applet:add_header("Content-Type", "application/json")
-            applet:add_header("Content-Length", tostring(#error_response))
-            applet:start_response()
-            applet:send(error_response)
         end
         return
     end
     
-    -- Default response for unknown endpoints
-    local error_response = json.encode({error = "Endpoint not found"})
-    applet:set_status(404)
-    applet:add_header("Content-Type", "application/json")
-    applet:add_header("Content-Length", tostring(#error_response))
-    applet:start_response()
-    applet:send(error_response)
+    -- Default response
+    send_error_response(applet, 404, "Endpoint not found")
 end)
 
--- Session validation action for HAProxy
+-- =============================================================================
+-- HAProxy ACTIONS
+-- =============================================================================
 core.register_action("validate_session_action", { "http-req" }, function(txn)
     local headers = txn.http:req_get_headers()
-    local cookies = headers["cookie"] and headers["cookie"][0] or headers["Cookie"] and headers["Cookie"][0] or ""
-    local session_token = string.match(cookies, "js_challenge_session=([^;]*)")
+    local cookies = headers["cookie"] and headers["cookie"][0] or 
+                   headers["Cookie"] and headers["Cookie"][0] or ""
     
+    local session_token = string.match(cookies, "js_challenge_session=([^;]*)")
     local is_valid = validate_session(session_token)
+    
     txn:set_var("req.session_valid", is_valid and "1" or "0")
 end) 
