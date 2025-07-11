@@ -243,6 +243,32 @@ local function validate_session(session_token)
     return true
 end
 
+-- Service to serve challenge page with inspect protection
+core.register_service("serve_challenge_page", "http", function(applet)
+    local file_path = "/usr/local/etc/haproxy/challenge-page.html"
+    local file = io.open(file_path, "r")
+    
+    if file then
+        local content = file:read("*all")
+        file:close()
+        
+        applet:set_status(200)
+        applet:add_header("content-type", "text/html")
+        applet:add_header("cache-control", "no-cache, no-store, must-revalidate")
+        applet:add_header("pragma", "no-cache")
+        applet:add_header("expires", "0")
+        applet:add_header("content-length", tostring(#content))
+        applet:start_response()
+        applet:send(content)
+    else
+        applet:set_status(500)
+        applet:add_header("content-type", "text/plain")
+        applet:add_header("content-length", "28")
+        applet:start_response()
+        applet:send("Error: Challenge page not found")
+    end
+end)
+
 -- API service for HAProxy
 core.register_service("api_service", "http", function(applet)
     local method = applet.method
@@ -268,6 +294,7 @@ core.register_service("api_service", "http", function(applet)
         applet:add_header("Cache-Control", "no-cache, no-store, must-revalidate")
         applet:add_header("Pragma", "no-cache")
         applet:add_header("Expires", "0")
+        applet:add_header("Content-Length", tostring(#response_body))
         applet:start_response()
         applet:send(response_body)
         return
@@ -276,19 +303,23 @@ core.register_service("api_service", "http", function(applet)
     if path == "/api/validate" and method == "POST" then
         local body = applet:receive()
         if not body or body == "" then
+            local error_response = json.encode({error = "Missing request body"})
             applet:set_status(400)
             applet:add_header("Content-Type", "application/json")
+            applet:add_header("Content-Length", tostring(#error_response))
             applet:start_response()
-            applet:send(json.encode({error = "Missing request body"}))
+            applet:send(error_response)
             return
         end
         
         local data = json.decode(body)
         if not data or not data.challengeId or not data.solution then
+            local error_response = json.encode({error = "Missing challengeId or solution"})
             applet:set_status(400)
             applet:add_header("Content-Type", "application/json")
+            applet:add_header("Content-Length", tostring(#error_response))
             applet:start_response()
-            applet:send(json.encode({error = "Missing challengeId or solution"}))
+            applet:send(error_response)
             return
         end
         
@@ -297,42 +328,51 @@ core.register_service("api_service", "http", function(applet)
         if result.valid then
             local session_token = create_session()
             if not session_token then
+                local error_response = json.encode({error = "Failed to create session"})
                 applet:set_status(500)
                 applet:add_header("Content-Type", "application/json")
+                applet:add_header("Content-Length", tostring(#error_response))
                 applet:start_response()
-                applet:send(json.encode({error = "Failed to create session"}))
+                applet:send(error_response)
                 return
             end
             
             local cookie = "js_challenge_session=" .. session_token .. 
                           "; HttpOnly; SameSite=Strict; Max-Age=" .. SESSION_EXPIRY .. "; Path=/"
             
-            applet:set_status(200)
-            applet:add_header("Content-Type", "application/json")
-            applet:add_header("Set-Cookie", cookie)
-            applet:start_response()
-            applet:send(json.encode({
+            local success_response = json.encode({
                 success = true,
                 message = "Challenge completed successfully",
                 redirect = "/"
-            }))
-        else
-            applet:set_status(400)
+            })
+            
+            applet:set_status(200)
             applet:add_header("Content-Type", "application/json")
+            applet:add_header("Set-Cookie", cookie)
+            applet:add_header("Content-Length", tostring(#success_response))
             applet:start_response()
-            applet:send(json.encode({
+            applet:send(success_response)
+        else
+            local error_response = json.encode({
                 success = false,
                 error = result.error or "Invalid solution"
-            }))
+            })
+            applet:set_status(400)
+            applet:add_header("Content-Type", "application/json")
+            applet:add_header("Content-Length", tostring(#error_response))
+            applet:start_response()
+            applet:send(error_response)
         end
         return
     end
     
     -- Default response for unknown endpoints
+    local error_response = json.encode({error = "Endpoint not found"})
     applet:set_status(404)
     applet:add_header("Content-Type", "application/json")
+    applet:add_header("Content-Length", tostring(#error_response))
     applet:start_response()
-    applet:send(json.encode({error = "Endpoint not found"}))
+    applet:send(error_response)
 end)
 
 -- Session validation action for HAProxy

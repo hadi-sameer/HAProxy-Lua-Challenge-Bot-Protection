@@ -20,6 +20,7 @@ RUN mkdir -p /usr/local/etc/haproxy/lua-scripts \
 # Copy only essential files
 COPY haproxy.cfg /usr/local/etc/haproxy/haproxy.cfg
 COPY lua-scripts/ /usr/local/etc/haproxy/lua-scripts/
+COPY challenge-page.html /usr/local/etc/haproxy/challenge-page.html
 
 # Set proper permissions
 RUN chown -R haproxy:haproxy /usr/local/etc/haproxy \
