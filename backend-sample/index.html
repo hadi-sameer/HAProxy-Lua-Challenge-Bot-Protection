@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protected Application - HAProxy Lua Challenge</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            padding: 1rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .nav {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 2rem;
+        }
+
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .nav-brand i {
+            color: #667eea;
+        }
+
+        .nav-menu {
+            display: flex;
+            list-style: none;
+            gap: 2rem;
+        }
+
+        .nav-link {
+            text-decoration: none;
+            color: #666;
+            font-weight: 500;
+            transition: color 0.3s ease;
+        }
+
+        .nav-link:hover {
+            color: #667eea;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .hero {
+            text-align: center;
+            padding: 4rem 0;
+        }
+
+        .hero-content {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 4rem;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+        }
+
+        .hero-title {
+            font-size: 3rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero-subtitle {
+            font-size: 1.2rem;
+            color: #666;
+            margin-bottom: 2rem;
+            line-height: 1.6;
+        }
+
+        .success-icon {
+            width: 120px;
+            height: 120px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            border-radius: 50%;
+            margin: 0 auto 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: pulse 2s ease-in-out infinite;
+            box-shadow: 0 10px 30px rgba(16, 185, 129, 0.3);
+        }
+
+        .success-icon i {
+            font-size: 4rem;
+            color: white;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 4rem;
+        }
+
+        .feature-card {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 15px;
+            padding: 2rem;
+            text-align: left;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .feature-icon {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+
+        .feature-icon i {
+            font-size: 1.5rem;
+            color: white;
+        }
+
+        .feature-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #333;
+        }
+
+        .feature-text {
+            color: #666;
+            line-height: 1.6;
+        }
+
+        .info-section {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 15px;
+            padding: 2rem;
+            margin-top: 3rem;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .info-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .info-text {
+            color: #666;
+            line-height: 1.6;
+            margin-bottom: 1rem;
+        }
+
+        .badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            margin: 0.5rem 0.5rem 0.5rem 0;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+
+        .stat-card {
+            background: rgba(102, 126, 234, 0.1);
+            border: 1px solid rgba(102, 126, 234, 0.2);
+            border-radius: 10px;
+            padding: 1.5rem;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            color: #666;
+            font-weight: 500;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: rgba(255, 255, 255, 0.8);
+            margin-top: 4rem;
+        }
+
+        @media (max-width: 768px) {
+            .nav {
+                padding: 0 1rem;
+            }
+            
+            .nav-menu {
+                display: none;
+            }
+            
+            .hero-content {
+                padding: 2rem;
+            }
+            
+            .hero-title {
+                font-size: 2rem;
+            }
+            
+            .container {
+                padding: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <nav class="nav">
+            <div class="nav-brand">
+                <i class="fas fa-shield-check"></i>
+                <span>Protected App</span>
+            </div>
+            <ul class="nav-menu">
+                <li><a href="#home" class="nav-link">Home</a></li>
+                <li><a href="#features" class="nav-link">Features</a></li>
+                <li><a href="#about" class="nav-link">About</a></li>
+                <li><a href="#stats" class="nav-link">Stats</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <div class="container">
+        <section class="hero" id="home">
+            <div class="hero-content">
+                <div class="success-icon">
+                    <i class="fas fa-check"></i>
+                </div>
+                
+                <h1 class="hero-title">Welcome to the Protected Zone!</h1>
+                <p class="hero-subtitle">
+                    🎉 Congratulations! You have successfully passed the JavaScript Challenge Bot protection system. 
+                    Your request has been verified and you now have access to this protected application.
+                </p>
+                
+                <div class="badges">
+                    <span class="badge">✅ Bot Protection Passed</span>
+                    <span class="badge">🔒 Security Verified</span>
+                    <span class="badge">🚀 Human Confirmed</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="features" id="features">
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-shield-alt"></i>
+                </div>
+                <h3 class="feature-title">HAProxy Lua Protection</h3>
+                <p class="feature-text">
+                    This application is protected by a sophisticated HAProxy configuration with Lua scripts that implement JavaScript challenges directly at the load balancer level.
+                </p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-cogs"></i>
+                </div>
+                <h3 class="feature-title">Proof-of-Work Challenge</h3>
+                <p class="feature-text">
+                    The protection system uses SHA-256 based proof-of-work challenges that require computational effort from legitimate users while blocking automated bots.
+                </p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-users"></i>
+                </div>
+                <h3 class="feature-title">Human-Friendly</h3>
+                <p class="feature-text">
+                    The challenge is designed to be easily solvable by human users with modern browsers while being computationally expensive for attackers.
+                </p>
+            </div>
+        </section>
+
+        <section class="info-section" id="about">
+            <h2 class="info-title">
+                <i class="fas fa-info-circle"></i>
+                How the Protection Works
+            </h2>
+            <p class="info-text">
+                This application demonstrates a complete Bot protection system implemented using HAProxy with Lua scripts. 
+                When you first accessed this site, you were redirected to a challenge page where your browser computed a 
+                cryptographic proof-of-work solution.
+            </p>
+            <p class="info-text">
+                The system works by:
+            </p>
+            <ul style="color: #666; line-height: 1.6; margin-left: 2rem;">
+                <li>Detecting requests without valid session cookies</li>
+                <li>Redirecting users to a JavaScript challenge page</li>
+                <li>Requiring proof-of-work computation using Web Workers</li>
+                <li>Validating solutions server-side using Lua scripts</li>
+                <li>Setting secure session cookies for verified users</li>
+            </ul>
+        </section>
+
+        <section class="stats-grid" id="stats">
+            <div class="stat-card">
+                <div class="stat-number" id="sessionTime">--</div>
+                <div class="stat-label">Session Active</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">100%</div>
+                <div class="stat-label">Protection Rate</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">< 3s</div>
+                <div class="stat-label">Challenge Time</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">SHA-256</div>
+                <div class="stat-label">Algorithm</div>
+            </div>
+        </section>
+
+        <section class="info-section">
+            <h2 class="info-title">
+                <i class="fas fa-code"></i>
+                Technical Implementation
+            </h2>
+            <p class="info-text">
+                This protection system is built with:
+            </p>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                <div style="background: rgba(102, 126, 234, 0.1); padding: 1rem; border-radius: 8px;">
+                    <strong>HAProxy 2.8+</strong><br>
+                    <small>Load balancer with Lua support</small>
+                </div>
+                <div style="background: rgba(102, 126, 234, 0.1); padding: 1rem; border-radius: 8px;">
+                    <strong>Lua Scripts</strong><br>
+                    <small>Challenge generation & validation</small>
+                </div>
+                <div style="background: rgba(102, 126, 234, 0.1); padding: 1rem; border-radius: 8px;">
+                    <strong>Web Workers</strong><br>
+                    <small>Multi-threaded hash computation</small>
+                </div>
+                <div style="background: rgba(102, 126, 234, 0.1); padding: 1rem; border-radius: 8px;">
+                    <strong>Docker</strong><br>
+                    <small>Containerized deployment</small>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <footer class="footer">
+        <p>🛡️ Protected by HAProxy Lua-based JavaScript Challenge System</p>
+        <p>Visit <a href="http://localhost:8404/stats" style="color: rgba(255,255,255,0.9);">HAProxy Stats</a> to monitor the system</p>
+    </footer>
+
+    <script>
+        // Update session time counter
+        function updateSessionTime() {
+            const startTime = sessionStorage.getItem('challengePassedTime') || Date.now();
+            if (!sessionStorage.getItem('challengePassedTime')) {
+                sessionStorage.setItem('challengePassedTime', Date.now());
+            }
+            
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            
+            document.getElementById('sessionTime').textContent = 
+                minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+        }
+
+        // Update time every second
+        setInterval(updateSessionTime, 1000);
+        updateSessionTime();
+
+        // Add some interactivity
+        document.addEventListener('DOMContentLoaded', function() {
+            // Animate stats on scroll
+            const observerOptions = {
+                threshold: 0.1,
+                rootMargin: '0px 0px -50px 0px'
+            };
+
+            const observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.style.opacity = '1';
+                        entry.target.style.transform = 'translateY(0)';
+                    }
+                });
+            }, observerOptions);
+
+            // Observe all feature cards
+            document.querySelectorAll('.feature-card, .stat-card').forEach(card => {
+                card.style.opacity = '0';
+                card.style.transform = 'translateY(20px)';
+                card.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+                observer.observe(card);
+            });
+        });
+    </script>
+</body>
+</html> 

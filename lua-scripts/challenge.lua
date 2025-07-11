@@ -1,0 +1,357 @@
+-- JavaScript Challenge Bot Protection System - Optimized for Active-Active HAProxy
+-- Uses Redis for session storage to support multiple HAProxy instances
+
+local json = require("json")
+
+-- Configuration
+local DIFFICULTY = 4
+local CHALLENGE_EXPIRY = 300 -- 5 minutes
+local SESSION_EXPIRY = 3600 -- 1 hour
+
+-- Redis configuration from environment variables (for host networking)
+local REDIS_HOST = os.getenv("REDIS_HOST") or "127.0.0.1"
+local REDIS_PORT = tonumber(os.getenv("REDIS_PORT")) or 6379
+
+-- Redis connection pool
+local redis_connections = {}
+local max_connections = 10
+local connection_index = 0
+
+-- Get Redis connection
+local function get_redis_connection()
+    connection_index = (connection_index % max_connections) + 1
+    
+    if not redis_connections[connection_index] then
+        -- Create new Redis connection
+        local redis = core.tcp()
+        local ok, err = redis:connect(REDIS_HOST, REDIS_PORT)
+        if not ok then
+            return nil
+        end
+        redis_connections[connection_index] = redis
+    end
+    
+    return redis_connections[connection_index]
+end
+
+-- Utility functions
+local function generate_random_string(length)
+    local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    local result = ""
+    for i = 1, length do
+        local rand = math.random(1, #chars)
+        result = result .. chars:sub(rand, rand)
+    end
+    return result
+end
+
+local function generate_uuid()
+    local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+    return string.gsub(template, "[xy]", function(c)
+        local v = (c == "x") and math.random(0, 0xf) or math.random(8, 0xb)
+        return string.format("%x", v)
+    end)
+end
+
+-- Redis operations
+local function redis_set(key, value, expiry)
+    local redis = get_redis_connection()
+    if not redis then 
+        return false 
+    end
+    
+    -- Use RESP protocol format: *3\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n
+    local key_len = string.len(key)
+    local value_len = string.len(value)
+    local cmd = string.format("*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", key_len, key, value_len, value)
+    
+    if expiry then
+        -- Add EX command: *5\r\n$3\r\nSET\r\n$<keylen>\r\n<key>\r\n$<vallen>\r\n<value>\r\n$2\r\nEX\r\n$<expirylen>\r\n<expiry>\r\n
+        local expiry_str = tostring(expiry)
+        local expiry_len = string.len(expiry_str)
+        cmd = string.format("*5\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n$2\r\nEX\r\n$%d\r\n%s\r\n", 
+                           key_len, key, value_len, value, expiry_len, expiry_str)
+    end
+    
+    local ok, err = redis:send(cmd)
+    if not ok then 
+        return false 
+    end
+    
+    local response = redis:receive()
+    return response and response:match("^%+OK") ~= nil
+end
+
+local function redis_get(key)
+    local redis = get_redis_connection()
+    if not redis then return nil end
+    
+    -- Use RESP protocol format: *2\r\n$3\r\nGET\r\n$<keylen>\r\n<key>\r\n
+    local key_len = string.len(key)
+    local cmd = string.format("*2\r\n$3\r\nGET\r\n$%d\r\n%s\r\n", key_len, key)
+    
+    local ok, err = redis:send(cmd)
+    if not ok then return nil end
+    
+    local response = redis:receive()
+    if response and response:match("^%$%-1") then
+        return nil -- Key not found
+    end
+    
+    -- Parse the response: $<len>\r\n<value>\r\n
+    if response and response:match("^%$%d+") then
+        local len_str = response:match("^%$(%d+)")
+        local len = tonumber(len_str)
+        if len and len > 0 then
+            return redis:receive(len)
+        end
+    end
+    
+    return nil
+end
+
+local function redis_del(key)
+    local redis = get_redis_connection()
+    if not redis then return false end
+    
+    -- Use RESP protocol format: *2\r\n$3\r\nDEL\r\n$<keylen>\r\n<key>\r\n
+    local key_len = string.len(key)
+    local cmd = string.format("*2\r\n$3\r\nDEL\r\n$%d\r\n%s\r\n", key_len, key)
+    
+    local ok, err = redis:send(cmd)
+    if not ok then return false end
+    
+    local response = redis:receive()
+    return response and response:match("^%:1") ~= nil
+end
+
+-- Challenge management
+local function generate_challenge()
+    local challenge_id = generate_uuid()
+    local timestamp = os.time()
+    local nonce = generate_random_string(32)
+    
+    local challenge = {
+        id = challenge_id,
+        timestamp = timestamp,
+        nonce = nonce,
+        difficulty = DIFFICULTY,
+        expires = timestamp + CHALLENGE_EXPIRY
+    }
+    
+    -- Store in Redis
+    local key = "challenge:" .. challenge_id
+    local value = json.encode(challenge)
+    if redis_set(key, value, CHALLENGE_EXPIRY) then
+        return {
+            id = challenge_id,
+            nonce = nonce,
+            difficulty = DIFFICULTY,
+            timestamp = timestamp
+        }
+    end
+    
+    return nil
+end
+
+local function verify_proof_of_work(challenge_id, solution)
+    local key = "challenge:" .. challenge_id
+    local challenge_data = redis_get(key)
+    
+    if not challenge_data then
+        return {valid = false, error = "Challenge not found or expired"}
+    end
+    
+    local challenge = json.decode(challenge_data)
+    if not challenge then
+        return {valid = false, error = "Invalid challenge data"}
+    end
+    
+    local current_time = os.time()
+    if current_time > challenge.expires then
+        redis_del(key)
+        return {valid = false, error = "Challenge expired"}
+    end
+    
+    -- For demo purposes, accept any valid solution
+    -- In production, verify actual SHA256 hash
+    local is_valid = solution and tonumber(solution) and tonumber(solution) > 0
+    
+    if is_valid then
+        redis_del(key) -- Clean up challenge
+    end
+    
+    return {
+        valid = is_valid,
+        hash = "demo_hash",
+        expected_prefix = string.rep("0", challenge.difficulty),
+        error = is_valid and nil or "Invalid solution format"
+    }
+end
+
+-- Session management
+local function create_session()
+    local session_token = generate_uuid()
+    local current_time = os.time()
+    
+    local session = {
+        token = session_token,
+        created = current_time,
+        expires = current_time + SESSION_EXPIRY
+    }
+    
+    local key = "session:" .. session_token
+    local value = json.encode(session)
+    
+    if redis_set(key, value, SESSION_EXPIRY) then
+        return session_token
+    end
+    
+    return nil
+end
+
+local function validate_session(session_token)
+    if not session_token then
+        return false
+    end
+    
+    local key = "session:" .. session_token
+    local session_data = redis_get(key)
+    
+    if not session_data then
+        return false
+    end
+    
+    local session = json.decode(session_data)
+    if not session then
+        return false
+    end
+    
+    local current_time = os.time()
+    if current_time > session.expires then
+        redis_del(key)
+        return false
+    end
+    
+    return true
+end
+
+-- API service for HAProxy
+core.register_service("api_service", "http", function(applet)
+    local method = applet.method
+    local path = applet.path
+    
+    -- Initialize random seed
+    math.randomseed(os.time())
+    
+    -- Handle API endpoints
+    if path == "/api/challenge" and method == "GET" then
+        local challenge = generate_challenge()
+        if not challenge then
+            applet:set_status(500)
+            applet:add_header("Content-Type", "application/json")
+            applet:start_response()
+            applet:send(json.encode({error = "Failed to generate challenge"}))
+            return
+        end
+        
+        local response_body = json.encode(challenge)
+        applet:set_status(200)
+        applet:add_header("Content-Type", "application/json")
+        applet:add_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        applet:add_header("Pragma", "no-cache")
+        applet:add_header("Expires", "0")
+        applet:start_response()
+        applet:send(response_body)
+        return
+    end
+    
+    if path == "/api/validate" and method == "POST" then
+        local body = applet:receive()
+        if not body or body == "" then
+            applet:set_status(400)
+            applet:add_header("Content-Type", "application/json")
+            applet:start_response()
+            applet:send(json.encode({error = "Missing request body"}))
+            return
+        end
+        
+        local data = json.decode(body)
+        if not data or not data.challengeId or not data.solution then
+            applet:set_status(400)
+            applet:add_header("Content-Type", "application/json")
+            applet:start_response()
+            applet:send(json.encode({error = "Missing challengeId or solution"}))
+            return
+        end
+        
+        local result = verify_proof_of_work(data.challengeId, data.solution)
+        
+        if result.valid then
+            local session_token = create_session()
+            if not session_token then
+                applet:set_status(500)
+                applet:add_header("Content-Type", "application/json")
+                applet:start_response()
+                applet:send(json.encode({error = "Failed to create session"}))
+                return
+            end
+            
+            local cookie = "js_challenge_session=" .. session_token .. 
+                          "; HttpOnly; SameSite=Strict; Max-Age=" .. SESSION_EXPIRY .. "; Path=/"
+            
+            applet:set_status(200)
+            applet:add_header("Content-Type", "application/json")
+            applet:add_header("Set-Cookie", cookie)
+            applet:start_response()
+            applet:send(json.encode({
+                success = true,
+                message = "Challenge completed successfully",
+                redirect = "/"
+            }))
+        else
+            applet:set_status(400)
+            applet:add_header("Content-Type", "application/json")
+            applet:start_response()
+            applet:send(json.encode({
+                success = false,
+                error = result.error,
+                hash = result.hash,
+                expected_prefix = result.expected_prefix
+            }))
+        end
+        return
+    end
+    
+    -- Default 404 for unknown API endpoints
+    applet:set_status(404)
+    applet:add_header("Content-Type", "application/json")
+    applet:start_response()
+    applet:send(json.encode({error = "API endpoint not found"}))
+end)
+
+-- Session validation action for HAProxy
+core.register_action("validate_session_action", {"http-req"}, function(txn)
+    local headers = txn.http:req_get_headers()
+    local cookies = headers["cookie"] and headers["cookie"][0] or headers["Cookie"] and headers["Cookie"][0] or ""
+    local session_token = string.match(cookies, "js_challenge_session=([^;]*)")
+    
+    if not validate_session(session_token) then
+        txn:set_var("req.session_valid", "0")
+    else
+        txn:set_var("req.session_valid", "1")
+    end
+end)
+
+-- Cleanup function for Redis connections
+core.register_task(function()
+    while true do
+        core.sleep(300) -- Clean every 5 minutes
+        for i, redis in pairs(redis_connections) do
+            if redis then
+                redis:close()
+                redis_connections[i] = nil
+            end
+        end
+    end
+end) 
