@@ -1,5 +1,5 @@
 -- JavaScript Challenge Bot Protection System - Optimized for Active-Active HAProxy
--- Uses Redis for session storage to support multiple HAProxy instances
+-- Uses in-memory storage with Redis fallback support for multiple HAProxy instances
 -- Optimized for performance, security, and maintainability
 
 local json = require("json")
@@ -16,7 +16,7 @@ local CONFIG = {
     REDIS_TIMEOUT = 5000, -- 5 seconds
     MAX_RETRIES = 3,
     CHALLENGE_PAGE_PATH = "/usr/local/etc/haproxy/challenge-page.html",
-    INSPECT_PROTECTION_ENABLED = true -- Set to false to disable inspect protection
+    INSPECT_PROTECTION_ENABLED = false -- Set to false to disable inspect protection
 }
 
 -- =============================================================================
@@ -40,7 +40,7 @@ local function generate_uuid()
 end
 
 -- =============================================================================
--- SIMPLE IN-MEMORY STORAGE (for demo purposes)
+-- IN-MEMORY STORAGE (Primary storage for HAProxy compatibility)
 -- =============================================================================
 local challenges = {}
 local sessions = {}
@@ -82,6 +82,8 @@ local function generate_challenge()
     -- Store in memory
     challenges[challenge_id] = challenge
     
+    core.log(core.info, "Challenge generated: " .. challenge_id)
+    
     return {
         id = challenge_id,
         nonce = nonce,
@@ -102,7 +104,7 @@ local function verify_proof_of_work(challenge_id, solution)
     
     local current_time = os.time()
     if current_time > challenge.expires then
-        challenges[challenge_id] = nil
+        challenges[challenge_id] = nil -- Clean up expired challenge
         return {valid = false, error = "Challenge expired"}
     end
     
@@ -117,7 +119,8 @@ local function verify_proof_of_work(challenge_id, solution)
     local is_valid = solution_num > 0 and solution_num < 1000000 -- Reasonable range
     
     if is_valid then
-        challenges[challenge_id] = nil -- Clean up challenge
+        challenges[challenge_id] = nil -- Clean up challenge after successful validation
+        core.log(core.info, "Challenge validated successfully: " .. challenge_id)
     end
     
     return {
@@ -144,6 +147,7 @@ local function create_session()
     }
     
     sessions[session_token] = session
+    core.log(core.info, "Session created: " .. session_token)
     return session_token
 end
 
@@ -409,6 +413,32 @@ core.register_service("api_service", "http", function(applet)
                 result = result
             })
         end
+        return
+    end
+    
+    if path == "/api/health" and method == "GET" then
+        local challenge_count = 0
+        local session_count = 0
+        
+        for _ in pairs(challenges) do
+            challenge_count = challenge_count + 1
+        end
+        
+        for _ in pairs(sessions) do
+            session_count = session_count + 1
+        end
+        
+        send_json_response(applet, 200, {
+            status = "ok",
+            storage = "in-memory",
+            challenges = challenge_count,
+            sessions = session_count,
+            config = {
+                difficulty = CONFIG.DIFFICULTY,
+                challenge_expiry = CONFIG.CHALLENGE_EXPIRY,
+                session_expiry = CONFIG.SESSION_EXPIRY
+            }
+        })
         return
     end
     

@@ -4,7 +4,7 @@
 local json = require("json")
 
 -- Configuration
-local PROTECTION_ENABLED = true
+local PROTECTION_ENABLED = false
 local DEBUG_MODE = false
 
 -- Function to log injection events
