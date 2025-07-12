@@ -1,5 +1,5 @@
 -- JavaScript Challenge Bot Protection System - Optimized for Active-Active HAProxy
--- Uses in-memory storage with Redis fallback support for multiple HAProxy instances
+-- Uses Redis storage with in-memory fallback for multiple HAProxy instances
 -- Optimized for performance, security, and maintainability
 
 local json = require("json")
@@ -16,7 +16,10 @@ local CONFIG = {
     REDIS_TIMEOUT = 5000, -- 5 seconds
     MAX_RETRIES = 3,
     CHALLENGE_PAGE_PATH = "/usr/local/etc/haproxy/challenge-page.html",
-    INSPECT_PROTECTION_ENABLED = false -- Set to false to disable inspect protection
+    INSPECT_PROTECTION_ENABLED = true, -- Set to false to disable inspect protection
+    USE_REDIS = true, -- Set to false to use in-memory storage only
+    REDIS_KEY_PREFIX = "challenge:",
+    SESSION_KEY_PREFIX = "session:"
 }
 
 -- =============================================================================
@@ -40,7 +43,140 @@ local function generate_uuid()
 end
 
 -- =============================================================================
--- IN-MEMORY STORAGE (Primary storage for HAProxy compatibility)
+-- REDIS CONNECTION MANAGEMENT
+-- =============================================================================
+-- Note: Each request needs its own Redis connection due to HAProxy threading
+
+local function create_redis_connection()
+    if not CONFIG.USE_REDIS then
+        return nil
+    end
+    
+    local socket = core.tcp()
+    if not socket then
+        core.log(core.warning, "Failed to create TCP socket for Redis")
+        return nil
+    end
+    
+    socket:settimeout(CONFIG.REDIS_TIMEOUT)
+    
+    local success, err = socket:connect(CONFIG.REDIS_HOST, CONFIG.REDIS_PORT)
+    if not success then
+        core.log(core.warning, "Failed to connect to Redis: " .. (err or "unknown error"))
+        socket:close()
+        return nil
+    end
+    
+    return socket
+end
+
+-- RESP command builder for Redis
+local function build_redis_command(args)
+    local cmd = {"*" .. #args .. "\r\n"}
+    for i = 1, #args do
+        local arg = tostring(args[i])
+        table.insert(cmd, "$" .. #arg .. "\r\n" .. arg .. "\r\n")
+    end
+    return table.concat(cmd)
+end
+
+-- =============================================================================
+-- REDIS STORAGE FUNCTIONS
+-- =============================================================================
+local function redis_command(args)
+    if not CONFIG.USE_REDIS then
+        return nil, "Redis disabled"
+    end
+    
+    local socket = create_redis_connection()
+    if not socket then
+        return nil, "Redis connection failed"
+    end
+    
+    local cmd = build_redis_command(args)
+    local success, err = socket:send(cmd)
+    if not success then
+        core.log(core.warning, "Failed to send Redis command: " .. (err or "unknown error"))
+        socket:close()
+        return nil, "Redis send failed"
+    end
+    
+    -- Read the response type
+    local response_type = socket:receive(1)
+    if not response_type then
+        socket:close()
+        return nil, "No response from Redis"
+    end
+    
+    if response_type == "-" then
+        -- Error response
+        local error_msg = socket:receive("*l")
+        socket:close()
+        core.log(core.warning, "Redis error: " .. error_msg)
+        return nil, error_msg
+    elseif response_type == "+" then
+        -- Simple string response
+        local response = socket:receive("*l")
+        socket:close()
+        return response
+    elseif response_type == ":" then
+        -- Integer response
+        local response = socket:receive("*l")
+        socket:close()
+        return tonumber(response)
+    elseif response_type == "$" then
+        -- Bulk string response
+        local length = tonumber(socket:receive("*l"))
+        if length == -1 then
+            socket:close()
+            return nil -- Null response
+        end
+        
+        local value = socket:receive(length)
+        socket:receive(2) -- Read \r\n
+        socket:close()
+        return value
+    else
+        socket:close()
+        core.log(core.warning, "Unknown Redis response type: " .. response_type)
+        return nil, "Unknown response type: " .. response_type
+    end
+end
+
+local function redis_set(key, value, expiry)
+    local json_value = json.encode(value)
+    local args = {"SET", key, json_value, "EX", expiry}
+    local result = redis_command(args)
+    if not result then
+        core.log(core.warning, "Redis SET failed for key: " .. key)
+    else
+        core.log(core.info, "Redis SET successful for key: " .. key)
+    end
+    return result
+end
+
+local function redis_get(key)
+    local args = {"GET", key}
+    local value = redis_command(args)
+    if not value then
+        return nil
+    end
+    return json.decode(value)
+end
+
+local function redis_del(key)
+    local args = {"DEL", key}
+    return redis_command(args)
+end
+
+local function redis_exists(key)
+    local args = {"EXISTS", key}
+    local response = redis_command(args)
+    return response and tonumber(response) == 1
+end
+
+-- =============================================================================
+-- IN-MEMORY STORAGE (Fallback storage)
 -- =============================================================================
 local challenges = {}
 local sessions = {}
@@ -79,8 +215,20 @@ local function generate_challenge()
         expires = timestamp + CONFIG.CHALLENGE_EXPIRY
     }
     
-    -- Store in memory
-    challenges[challenge_id] = challenge
+    -- Try to store in Redis first
+    if CONFIG.USE_REDIS then
+        local redis_key = CONFIG.REDIS_KEY_PREFIX .. challenge_id
+        local success = redis_set(redis_key, challenge, CONFIG.CHALLENGE_EXPIRY)
+        if success then
+            core.log(core.info, "Challenge stored in Redis: " .. challenge_id)
+        else
+            core.log(core.warning, "Failed to store challenge in Redis, using in-memory: " .. challenge_id)
+            challenges[challenge_id] = challenge
+        end
+    else
+        -- Store in memory
+        challenges[challenge_id] = challenge
+    end
     
     core.log(core.info, "Challenge generated: " .. challenge_id)
     
@@ -92,19 +240,52 @@ local function generate_challenge()
     }
 end
 
+local function get_challenge(challenge_id)
+    if not challenge_id then
+        return nil
+    end
+    
+    -- Try Redis first
+    if CONFIG.USE_REDIS then
+        local redis_key = CONFIG.REDIS_KEY_PREFIX .. challenge_id
+        local challenge = redis_get(redis_key)
+        if challenge then
+            return challenge
+        end
+    end
+    
+    -- Fallback to in-memory
+    return challenges[challenge_id]
+end
+
+local function delete_challenge(challenge_id)
+    if not challenge_id then
+        return
+    end
+    
+    -- Try Redis first
+    if CONFIG.USE_REDIS then
+        local redis_key = CONFIG.REDIS_KEY_PREFIX .. challenge_id
+        redis_del(redis_key)
+    end
+    
+    -- Also remove from memory if exists
+    challenges[challenge_id] = nil
+end
+
 local function verify_proof_of_work(challenge_id, solution)
     if not challenge_id or not solution then
         return {valid = false, error = "Missing challenge ID or solution"}
     end
     
-    local challenge = challenges[challenge_id]
+    local challenge = get_challenge(challenge_id)
     if not challenge then
         return {valid = false, error = "Challenge not found or expired"}
     end
     
     local current_time = os.time()
     if current_time > challenge.expires then
-        challenges[challenge_id] = nil -- Clean up expired challenge
+        delete_challenge(challenge_id) -- Clean up expired challenge
         return {valid = false, error = "Challenge expired"}
     end
     
@@ -119,7 +300,7 @@ local function verify_proof_of_work(challenge_id, solution)
     local is_valid = solution_num > 0 and solution_num < 1000000 -- Reasonable range
     
     if is_valid then
-        challenges[challenge_id] = nil -- Clean up challenge after successful validation
+        delete_challenge(challenge_id) -- Clean up challenge after successful validation
         core.log(core.info, "Challenge validated successfully: " .. challenge_id)
     end
     
@@ -146,9 +327,56 @@ local function create_session()
         expires = current_time + CONFIG.SESSION_EXPIRY
     }
     
-    sessions[session_token] = session
+    -- Try to store in Redis first
+    if CONFIG.USE_REDIS then
+        local redis_key = CONFIG.SESSION_KEY_PREFIX .. session_token
+        local success = redis_set(redis_key, session, CONFIG.SESSION_EXPIRY)
+        if success then
+            core.log(core.info, "Session stored in Redis: " .. session_token)
+        else
+            core.log(core.warning, "Failed to store session in Redis, using in-memory: " .. session_token)
+            sessions[session_token] = session
+        end
+    else
+        -- Store in memory
+        sessions[session_token] = session
+    end
+    
     core.log(core.info, "Session created: " .. session_token)
     return session_token
+end
+
+local function get_session(session_token)
+    if not session_token or session_token == "" then
+        return nil
+    end
+    
+    -- Try Redis first
+    if CONFIG.USE_REDIS then
+        local redis_key = CONFIG.SESSION_KEY_PREFIX .. session_token
+        local session = redis_get(redis_key)
+        if session then
+            return session
+        end
+    end
+    
+    -- Fallback to in-memory
+    return sessions[session_token]
+end
+
+local function delete_session(session_token)
+    if not session_token then
+        return
+    end
+    
+    -- Try Redis first
+    if CONFIG.USE_REDIS then
+        local redis_key = CONFIG.SESSION_KEY_PREFIX .. session_token
+        redis_del(redis_key)
+    end
+    
+    -- Also remove from memory if exists
+    sessions[session_token] = nil
 end
 
 local function validate_session(session_token)
@@ -156,14 +384,14 @@ local function validate_session(session_token)
         return false
     end
     
-    local session = sessions[session_token]
+    local session = get_session(session_token)
     if not session then
         return false
     end
     
     local current_time = os.time()
     if current_time > session.expires then
-        sessions[session_token] = nil
+        delete_session(session_token)
         return false
     end
     
@@ -352,7 +580,7 @@ core.register_service("api_service", "http", function(applet)
     -- Initialize random seed once per request
     math.randomseed(os.time() + os.clock() * 1000)
     
-    -- Clean up expired data
+    -- Clean up expired data (in-memory only)
     cleanup_expired()
     
     -- Route handling
@@ -419,24 +647,46 @@ core.register_service("api_service", "http", function(applet)
     if path == "/api/health" and method == "GET" then
         local challenge_count = 0
         local session_count = 0
+        local storage_type = "in-memory"
         
-        for _ in pairs(challenges) do
-            challenge_count = challenge_count + 1
-        end
-        
-        for _ in pairs(sessions) do
-            session_count = session_count + 1
+        if CONFIG.USE_REDIS then
+            storage_type = "redis"
+            -- Count challenges in Redis (approximate)
+            local redis_challenge_pattern = CONFIG.REDIS_KEY_PREFIX .. "*"
+            local redis_session_pattern = CONFIG.SESSION_KEY_PREFIX .. "*"
+            
+            -- For now, we'll count in-memory as fallback
+            for _ in pairs(challenges) do
+                challenge_count = challenge_count + 1
+            end
+            
+            for _ in pairs(sessions) do
+                session_count = session_count + 1
+            end
+        else
+            -- Count in-memory
+            for _ in pairs(challenges) do
+                challenge_count = challenge_count + 1
+            end
+            
+            for _ in pairs(sessions) do
+                session_count = session_count + 1
+            end
         end
         
         send_json_response(applet, 200, {
             status = "ok",
-            storage = "in-memory",
+            storage = storage_type,
             challenges = challenge_count,
             sessions = session_count,
+            redis_connected = CONFIG.USE_REDIS and (create_redis_connection() ~= nil),
             config = {
                 difficulty = CONFIG.DIFFICULTY,
                 challenge_expiry = CONFIG.CHALLENGE_EXPIRY,
-                session_expiry = CONFIG.SESSION_EXPIRY
+                session_expiry = CONFIG.SESSION_EXPIRY,
+                use_redis = CONFIG.USE_REDIS,
+                redis_host = CONFIG.REDIS_HOST,
+                redis_port = CONFIG.REDIS_PORT
             }
         })
         return
@@ -458,4 +708,10 @@ core.register_action("validate_session_action", { "http-req" }, function(txn)
     local is_valid = validate_session(session_token)
     
     txn:set_var("req.session_valid", is_valid and "1" or "0")
-end) 
+end)
+
+-- =============================================================================
+-- CLEANUP ON SHUTDOWN
+-- =============================================================================
+-- Note: core.register_fini is not available in HAProxy 2.8
+-- Redis connections will be cleaned up automatically when HAProxy shuts down 

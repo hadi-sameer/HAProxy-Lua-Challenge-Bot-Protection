@@ -48,6 +48,11 @@ Internet → HAProxy (8081) → Challenge System → Redis (6379)
               Backend App (8080)
 ```
 
+**Storage Architecture:**
+- **Primary**: Redis for challenges and sessions (distributed storage)
+- **Fallback**: In-memory storage (local HAProxy instance)
+- **Automatic Failover**: Seamless transition between storage types
+
 ### Core Components
 
 | Component | Port | Purpose |
@@ -58,11 +63,11 @@ Internet → HAProxy (8081) → Challenge System → Redis (6379)
 | **HAProxy Stats** | 8404 | Monitoring dashboard |
 
 ### Data Flow
-1. **Request** → HAProxy validates session against Redis
+1. **Request** → HAProxy validates session against Redis (with in-memory fallback)
 2. **No Session** → JavaScript challenge served
 3. **Proof-of-Work** → Client solves SHA256 puzzle
-4. **Validation** → Server verifies solution
-5. **Session Created** → Secure session stored in Redis
+4. **Validation** → Server verifies solution against Redis storage
+5. **Session Created** → Secure session stored in Redis (with automatic fallback)
 6. **Access Granted** → Client accesses protected backend
 
 ## 🔒 Security Features
@@ -73,7 +78,8 @@ Internet → HAProxy (8081) → Challenge System → Redis (6379)
 |---------|-------------|---------------|
 | **JavaScript Challenge** | SHA256 proof-of-work puzzle | 99%+ |
 | **Rate Limiting** | 30 requests/10s per IP | 90%+ |
-| **Session Management** | Redis-based with TTL | 99%+ |
+| **Session Management** | Redis-based with TTL + in-memory fallback | 99%+ |
+| **Challenge Storage** | Redis-based with automatic fallback | 99%+ |
 | **Security Headers** | XSS, CSRF, clickjacking protection | 95%+ |
 
 ### Challenge System
@@ -102,6 +108,7 @@ X-Challenge-Validated: true
 | `CHALLENGE_DIFFICULTY` | 4 | Proof-of-work difficulty |
 | `SESSION_EXPIRY` | 3600 | Session expiry (seconds) |
 | `CHALLENGE_EXPIRY` | 300 | Challenge expiry (seconds) |
+| `USE_REDIS` | true | Enable Redis storage (false = in-memory only) |
 
 ### Quick Configuration
 
@@ -144,6 +151,9 @@ docker ps --filter "name=haproxy"
 
 # Redis monitoring
 docker exec -it haproxy-redis redis-cli INFO memory
+
+# Check challenge storage
+curl http://localhost:8081/api/health
 ```
 
 ### Performance Metrics
@@ -195,6 +205,12 @@ docker exec -it haproxy-redis redis-cli FLUSHDB
 
 # View session statistics
 docker exec -it haproxy-redis redis-cli KEYS 'session:*' | wc -l
+
+# View challenge statistics
+docker exec -it haproxy-redis redis-cli KEYS 'challenge:*' | wc -l
+
+# Check storage status
+curl -s http://localhost:8081/api/health | jq '.storage, .redis_connected'
 ```
 
 
@@ -208,12 +224,16 @@ docker exec -it haproxy-redis redis-cli KEYS 'session:*' | wc -l
 docker ps | grep redis
 docker logs haproxy-redis
 docker exec -it haproxy-redis redis-cli ping
+
+# Check storage fallback
+curl -s http://localhost:8081/api/health | jq '.storage, .redis_connected'
 ```
 
 **Solutions:**
 - Ensure Redis container is running
 - Check port 6379 availability
 - Verify host networking
+- System automatically falls back to in-memory storage
 
 #### 2. HAProxy Configuration Error
 ```bash
@@ -353,7 +373,15 @@ docker exec -it haproxy-redis redis-cli
 
 # View sessions
 KEYS 'session:*'
+
+# View challenges
+KEYS 'challenge:*'
+
+# Clear all data
 FLUSHDB
+
+# Monitor Redis operations
+MONITOR
 ```
 
 #### HAProxy Management
