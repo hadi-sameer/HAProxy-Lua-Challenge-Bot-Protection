@@ -4,7 +4,7 @@
 local json = require("json")
 
 -- Configuration
-local INSPECT_BLOCK_ENABLED = false
+local INSPECT_BLOCK_ENABLED = true
 local DEBUG_MODE = false
 
 -- Detection patterns for developer tools
