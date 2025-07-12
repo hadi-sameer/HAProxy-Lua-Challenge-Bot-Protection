@@ -14,8 +14,8 @@ A **production-ready** bot protection system using HAProxy with Lua scripts and 
 
 ```bash
 # Clone and start in one command
-git clone https://github.com/your-repo/haproxy-lua-challenge.git
-cd haproxy-lua-challenge
+git clone https://github.com/hadisameer/HAProxy-Lua-Challenge-Bot-Protection.git
+cd HAProxy-Lua-Challenge-Bot-Protection
 ./start.sh
 
 # Verify it's working
@@ -197,17 +197,6 @@ docker exec -it haproxy-redis redis-cli FLUSHDB
 docker exec -it haproxy-redis redis-cli KEYS 'session:*' | wc -l
 ```
 
-### Backup Operations
-
-```bash
-# Backup Redis data
-docker exec haproxy-redis redis-cli BGSAVE
-docker cp haproxy-redis:/data/dump.rdb ./backup/
-
-# Backup configuration
-cp haproxy.cfg ./backup/
-cp -r lua-scripts ./backup/
-```
 
 ## 🚨 Troubleshooting
 
@@ -328,44 +317,6 @@ ab -n 10000 -c 50 http://localhost:8081/
 # Bot detection rate: 99%+
 ```
 
-## 🤝 Contributing
-
-### Development Setup
-```bash
-# Fork and clone
-git clone https://github.com/your-fork/haproxy-lua-challenge.git
-cd haproxy-lua-challenge
-
-# Create feature branch
-git checkout -b feature/your-feature-name
-
-# Test changes
-./start.sh
-./health-check.sh
-
-# Submit PR
-git push origin feature/your-feature-name
-```
-
-### Code Standards
-- **Lua**: Follow Lua style guide
-- **Bash**: Use shellcheck for validation
-- **HAProxy**: Validate configuration syntax
-- **Documentation**: Update README for new features
-
-### Testing
-```bash
-# Run tests
-./test-suite.sh
-
-# Test challenge system
-curl -X POST http://localhost:8081/api/challenge
-curl -X POST http://localhost:8081/api/validate -d '{"challengeId":"test","solution":"test"}'
-
-# Load testing
-ab -n 1000 -c 10 http://localhost:8081/
-```
-
 ## 📁 Project Structure
 
 ```
@@ -384,18 +335,6 @@ haproxy-lua-challenge/
 ├── 📁 backend-sample/              # Sample backend
 └── 📄 challenge-page.html          # Challenge interface
 ```
-
-## 📞 Support
-
-### Documentation
-- **API Docs**: [docs/API.md](docs/API.md)
-- **Configuration**: [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
-- **Troubleshooting**: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-
-### Community
-- **GitHub Issues**: Report bugs and features
-- **Discussions**: Community Q&A
-- **Wiki**: Community documentation
 
 ### Useful Commands
 
@@ -426,19 +365,6 @@ docker exec haproxy-lua haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
 curl http://localhost:8404/stats
 ```
 
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- **HAProxy Team**: Excellent load balancer and Lua support
-- **Redis Team**: High-performance in-memory database
-- **Open Source Community**: Contributions and feedback
-
----
 
 **🚀 Production Ready**: Optimized for production with comprehensive monitoring, security features, and scalability. Perfect for protecting web applications from automated attacks.
 
