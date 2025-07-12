@@ -14,7 +14,7 @@ A **production-ready** bot protection system using HAProxy with Lua scripts and 
 
 ```bash
 # Clone and start in one command
-git clone https://github.com/hadisameer/HAProxy-Lua-Challenge-Bot-Protection.git
+git clone https://github.com/hadi-sameer/HAProxy-Lua-Challenge-Bot-Protection.git
 cd HAProxy-Lua-Challenge-Bot-Protection
 ./start.sh
 
