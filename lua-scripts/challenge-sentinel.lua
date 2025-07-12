@@ -13,13 +13,11 @@ local CONFIG = {
     SESSION_EXPIRY = 3600, -- 1 hour
     CHALLENGE_TIMEOUT = 300, -- 5 minutes
     SESSION_TIMEOUT = 3600, -- 1 hour
-    REDIS_TIMEOUT = 1, -- 1 second timeout for Redis operations
+    REDIS_TIMEOUT = 0.5, -- 0.5 second timeout for Redis operations (reduced from 1)
     USE_REDIS = true, -- Set to false to use only in-memory storage
     REDIS_KEY_PREFIX = "challenge:",
     SESSION_KEY_PREFIX = "session:",
-    REDIS_SENTINEL_HOST = os.getenv("REDIS_SENTINEL_HOST") or "127.0.0.1",
-    REDIS_SENTINEL_PORT = tonumber(os.getenv("REDIS_SENTINEL_PORT")) or 26379,
-    REDIS_MASTER_NAME = os.getenv("REDIS_MASTER_NAME") or "mymaster",
+    REDIS_NODES = os.getenv("REDIS_NODES") or "127.0.0.1:6379,127.0.0.1:6380", -- Comma-separated list of Redis nodes
     REDIS_DOWN_TIMEOUT = 30, -- 30 seconds to retry after Redis failure
     MAX_RETRIES = 3,
     CHALLENGE_PAGE_PATH = "/usr/local/etc/haproxy/challenge-page.html",
@@ -115,33 +113,7 @@ local function redis_command(socket, args)
     return parse_redis_response(socket)
 end
 
--- Parse Sentinel slaves response
-local function parse_sentinel_slaves(slaves_info)
-    local slaves = {}
-    for i = 1, #slaves_info do
-        local entry = slaves_info[i]
-        if type(entry) == "table" then
-            local ip, port, flags
-            for j = 1, #entry, 2 do
-                if entry[j] == "ip" then
-                    ip = entry[j+1]
-                elseif entry[j] == "port" then
-                    port = tonumber(entry[j+1])
-                elseif entry[j] == "flags" then
-                    flags = entry[j+1]
-                end
-            end
-            -- Only include slaves that are not down (s_down)
-            if ip and port and flags and not string.find(flags, "s_down") then
-                table.insert(slaves, {host = ip, port = port})
-                core.log(core.info, "Found healthy slave: " .. ip .. ":" .. port)
-            elseif ip and port and flags and string.find(flags, "s_down") then
-                core.log(core.warning, "Skipping down slave: " .. ip .. ":" .. port .. " (flags: " .. flags .. ")")
-            end
-        end
-    end
-    return slaves
-end
+
 
 -- =============================================================================
 -- REDIS CONNECTION FUNCTIONS
@@ -238,64 +210,89 @@ local function discover_redis_nodes()
         return redis_available
     end
     
-    local socket = core.tcp()
-    if not socket then
-        core.log(core.warning, "Failed to create TCP socket for Sentinel")
+    -- Parse the comma-separated list of Redis nodes
+    local nodes_str = CONFIG.REDIS_NODES
+    local nodes = {}
+    for node_info in string.gmatch(nodes_str, "([^,]+)") do
+        local host, port_str = node_info:match("([^:]+):([0-9]+)")
+        if host and port_str then
+            table.insert(nodes, {host = host, port = tonumber(port_str)})
+        else
+            core.log(core.warning, "Skipping invalid Redis node: " .. node_info)
+        end
+    end
+
+    if #nodes == 0 then
+        core.log(core.warning, "No valid Redis nodes found in REDIS_NODES environment variable.")
         redis_available = false
         redis_down_until = current_time + CONFIG.REDIS_DOWN_TIMEOUT
         return false
     end
     
-    socket:settimeout(CONFIG.REDIS_TIMEOUT)
+    local master_found = false
+    local slaves_found = {}
     
-    local success, err = socket:connect(CONFIG.REDIS_SENTINEL_HOST, CONFIG.REDIS_SENTINEL_PORT)
-    if not success then
-        core.log(core.warning, "Failed to connect to Sentinel: " .. (err or "unknown error"))
-        socket:close()
-        redis_available = false
-        redis_down_until = current_time + CONFIG.REDIS_DOWN_TIMEOUT
-        return false
+    -- Try each Redis node to discover master and slaves
+    for _, node in ipairs(nodes) do
+        local socket = core.tcp()
+        if socket then
+            socket:settimeout(CONFIG.REDIS_TIMEOUT)
+            local success, err = socket:connect(node.host, node.port)
+            if success then
+                -- Check the role of this node
+                local role_info, err = redis_command(socket, {"INFO", "replication"})
+                socket:close()
+                
+                if role_info then
+                    -- Parse the role from INFO replication output
+                    local role = nil
+                    for line in role_info:gmatch("[^\r\n]+") do
+                        if line:match("^role:") then
+                            role = line:sub(6) -- Remove "role:" prefix
+                            break
+                        end
+                    end
+                    
+                    if role == "master" then
+                        redis_master = {host = node.host, port = node.port}
+                        master_found = true
+                        core.log(core.info, "Found Redis master: " .. node.host .. ":" .. node.port)
+                    elseif role == "slave" then
+                        table.insert(slaves_found, {host = node.host, port = node.port})
+                        core.log(core.info, "Found Redis slave: " .. node.host .. ":" .. node.port)
+                    else
+                        core.log(core.warning, "Unknown role '" .. (role or "nil") .. "' for node: " .. node.host .. ":" .. node.port)
+                    end
+                else
+                    core.log(core.warning, "Failed to get role info from " .. node.host .. ":" .. node.port .. " - " .. (err or "unknown error"))
+                end
+            else
+                core.log(core.warning, "Failed to connect to " .. node.host .. ":" .. node.port .. " - " .. (err or "unknown error"))
+                socket:close()
+            end
+        end
     end
     
-    -- Get master info
-    local master_info, err = redis_command(socket, {"SENTINEL", "get-master-addr-by-name", CONFIG.REDIS_MASTER_NAME})
-    if not master_info or #master_info < 2 then
-        core.log(core.warning, "Failed to get master info from Sentinel: " .. (err or "unknown error"))
-        socket:close()
-        redis_available = false
-        redis_down_until = current_time + CONFIG.REDIS_DOWN_TIMEOUT
-        return false
-    end
-    
-    redis_master = {
-        host = master_info[1],
-        port = tonumber(master_info[2])
-    }
-    
-    -- Get slaves info
-    local slaves_info, err = redis_command(socket, {"SENTINEL", "slaves", CONFIG.REDIS_MASTER_NAME})
-    if slaves_info then
-        redis_slaves = parse_sentinel_slaves(slaves_info)
-        core.log(core.info, "Discovered " .. #redis_slaves .. " slaves from Sentinel")
-    else
-        redis_slaves = {}
-        core.log(core.info, "No slaves discovered from Sentinel, will use master for reads")
-    end
-    
-    socket:close()
+    redis_slaves = slaves_found
     last_discovery = current_time
     
     -- Test if we can actually connect to Redis
-    local test_socket = create_master_connection()
-    if test_socket then
-        test_socket:close()
-        redis_available = true
-        redis_down_until = 0 -- Clear the down cache since Redis is working
-        core.log(core.info, "Redis discovery: Master=" .. redis_master.host .. ":" .. redis_master.port .. ", Slaves=" .. #redis_slaves .. " - Redis is AVAILABLE")
+    if master_found then
+        local test_socket = create_master_connection()
+        if test_socket then
+            test_socket:close()
+            redis_available = true
+            redis_down_until = 0 -- Clear the down cache since Redis is working
+            core.log(core.info, "Redis discovery: Master=" .. redis_master.host .. ":" .. redis_master.port .. ", Slaves=" .. #redis_slaves .. " - Redis is AVAILABLE")
+        else
+            redis_available = false
+            redis_down_until = current_time + CONFIG.REDIS_DOWN_TIMEOUT
+            core.log(core.warning, "Redis discovery: Master=" .. redis_master.host .. ":" .. redis_master.port .. ", Slaves=" .. #redis_slaves .. " - Redis is UNAVAILABLE, using in-memory storage")
+        end
     else
         redis_available = false
         redis_down_until = current_time + CONFIG.REDIS_DOWN_TIMEOUT
-        core.log(core.warning, "Redis discovery: Master=" .. redis_master.host .. ":" .. redis_master.port .. ", Slaves=" .. #redis_slaves .. " - Redis is UNAVAILABLE, using in-memory storage")
+        core.log(core.warning, "Redis discovery: No master found, Redis is UNAVAILABLE, using in-memory storage")
     end
     
     return redis_available
@@ -342,7 +339,7 @@ local function storage_set(key, value, expiry)
     if current_time < redis_down_until then
         redis_available = false
     else
-        -- Always check Redis availability first
+        -- Only check Redis availability if not in down cache
         discover_redis_nodes()
     end
     
@@ -393,7 +390,7 @@ local function storage_get(key)
     if current_time < redis_down_until then
         redis_available = false
     else
-        -- Always check Redis availability first
+        -- Only check Redis availability if not in down cache
         discover_redis_nodes()
     end
     
@@ -448,7 +445,7 @@ local function storage_exists(key)
     if current_time < redis_down_until then
         redis_available = false
     else
-        -- Always check Redis availability first
+        -- Only check Redis availability if not in down cache
         discover_redis_nodes()
     end
     
@@ -494,7 +491,7 @@ local function storage_del(key)
     if current_time < redis_down_until then
         redis_available = false
     else
-        -- Always check Redis availability first
+        -- Only check Redis availability if not in down cache
         discover_redis_nodes()
     end
     
