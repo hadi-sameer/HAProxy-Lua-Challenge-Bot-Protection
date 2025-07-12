@@ -13,7 +13,8 @@ local CONFIG = {
     SESSION_EXPIRY = 3600, -- 1 hour
     REDIS_HOST = os.getenv("REDIS_HOST") or "127.0.0.1",
     REDIS_PORT = tonumber(os.getenv("REDIS_PORT")) or 6379,
-    REDIS_TIMEOUT = 5000, -- 5 seconds
+    REDIS_TIMEOUT = 1000, -- 1 second (reduced from 5 seconds)
+    REDIS_DOWN_TIMEOUT = 30, -- 30 seconds to retry after Redis failure
     MAX_RETRIES = 3,
     CHALLENGE_PAGE_PATH = "/usr/local/etc/haproxy/challenge-page.html",
     INSPECT_PROTECTION_ENABLED = true, -- Set to false to disable inspect protection
@@ -47,8 +48,17 @@ end
 -- =============================================================================
 -- Note: Each request needs its own Redis connection due to HAProxy threading
 
+-- Redis connection status cache to avoid repeated connection attempts
+local redis_down_until = 0
+
 local function create_redis_connection()
     if not CONFIG.USE_REDIS then
+        return nil
+    end
+    
+    -- Check if Redis was recently down and we should skip connection attempts
+    local current_time = os.time()
+    if current_time < redis_down_until then
         return nil
     end
     
@@ -64,9 +74,13 @@ local function create_redis_connection()
     if not success then
         core.log(core.warning, "Failed to connect to Redis: " .. (err or "unknown error"))
         socket:close()
+        -- Mark Redis as down for the next 30 seconds to avoid repeated attempts
+        redis_down_until = current_time + CONFIG.REDIS_DOWN_TIMEOUT
         return nil
     end
     
+    -- Reset the down timer if connection succeeds
+    redis_down_until = 0
     return socket
 end
 
@@ -245,6 +259,13 @@ local function get_challenge(challenge_id)
         return nil
     end
     
+    -- Check if Redis is known to be down
+    local current_time = os.time()
+    if CONFIG.USE_REDIS and current_time < redis_down_until then
+        -- Redis is down, skip Redis lookup and go straight to in-memory
+        return challenges[challenge_id]
+    end
+    
     -- Try Redis first
     if CONFIG.USE_REDIS then
         local redis_key = CONFIG.REDIS_KEY_PREFIX .. challenge_id
@@ -349,6 +370,13 @@ end
 local function get_session(session_token)
     if not session_token or session_token == "" then
         return nil
+    end
+    
+    -- Check if Redis is known to be down
+    local current_time = os.time()
+    if CONFIG.USE_REDIS and current_time < redis_down_until then
+        -- Redis is down, skip Redis lookup and go straight to in-memory
+        return sessions[session_token]
     end
     
     -- Try Redis first
