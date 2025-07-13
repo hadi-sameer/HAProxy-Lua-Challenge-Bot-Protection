@@ -6,6 +6,7 @@ local json = require("json")
 -- Configuration
 local INSPECT_BLOCK_ENABLED = true
 local DEBUG_MODE = false
+local INSPECT_BYPASS_SECRET_KEY = "7f3dadc4-b35f-4d1c-a130-ad0ea2ae1ab7"
 
 -- Detection patterns for developer tools
 local DEVTOOLS_PATTERNS = {
@@ -120,6 +121,19 @@ local function inspect_protection_action(txn)
     local headers = txn.http and txn.http:req_get_headers() or {}
     local user_agent = headers["user-agent"] and headers["user-agent"][0] or headers["User-Agent"] and headers["User-Agent"][0] or nil
     local path = txn.sn and txn.sn:req_get_uri() or ""
+    
+    -- Check for secret key to bypass protection
+    local secret_key = headers["js_challenge_secret_key"] and headers["js_challenge_secret_key"][0] or 
+                      headers["Js-Challenge-Secret-Key"] and headers["Js-Challenge-Secret-Key"][0] or nil
+    
+    if secret_key == INSPECT_BYPASS_SECRET_KEY then
+        if DEBUG_MODE then
+            core.log(core.info, "INSPECT_PROTECTION_BYPASS: Secret key provided, bypassing protection for IP=" .. client_ip)
+        end
+        txn:set_var("req.inspect_blocked", "0")
+        txn:set_var("req.inspect_bypass", "1")
+        return
+    end
     
     -- Check for developer tools in headers
     local detected, reason = detect_devtools_headers(headers)

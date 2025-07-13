@@ -6,6 +6,7 @@ local json = require("json")
 -- Configuration
 local PROTECTION_ENABLED = true
 local DEBUG_MODE = false
+local INSPECT_BYPASS_SECRET_KEY = "7f3dadc4-b35f-4d1c-a130-ad0ea2ae1ab7"
 
 -- Function to log injection events
 local function log_injection(client_ip, path, content_length)
@@ -334,7 +335,13 @@ core.register_service("inject_protection", "http", function(applet)
     -- Check if this is HTML content that needs protection
     local is_html = content_type:find("text/html") or path:match("%.html?$")
     
-    if is_html and PROTECTION_ENABLED then
+    -- Check for secret key to bypass protection
+    local secret_key = applet.headers and applet.headers["js_challenge_secret_key"] and 
+                      applet.headers["js_challenge_secret_key"][0] or nil
+    
+    local bypass_protection = secret_key == INSPECT_BYPASS_SECRET_KEY
+    
+    if is_html and PROTECTION_ENABLED and not bypass_protection then
         -- Inject protection into HTML
         local protected_body = inject_protection_into_html(body)
         local new_content_length = #protected_body

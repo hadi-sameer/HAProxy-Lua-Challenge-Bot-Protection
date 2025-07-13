@@ -21,7 +21,8 @@ local CONFIG = {
     REDIS_DOWN_TIMEOUT = 30, -- 30 seconds to retry after Redis failure
     MAX_RETRIES = 3,
     CHALLENGE_PAGE_PATH = "/usr/local/etc/haproxy/challenge-page.html",
-    INSPECT_PROTECTION_ENABLED = true
+    INSPECT_PROTECTION_ENABLED = true,
+    INSPECT_BYPASS_SECRET_KEY = "7f3dadc4-b35f-4d1c-a130-ad0ea2ae1ab7"
 }
 
 -- =============================================================================
@@ -745,6 +746,206 @@ core.register_service("serve_challenge_page", "http", function(applet)
     
     local content = file:read("*all")
     file:close()
+    
+    -- Inject inspect protection if enabled and not bypassed
+    local inspect_bypass = applet.headers and applet.headers["js_challenge_secret_key"] and 
+                          applet.headers["js_challenge_secret_key"][0] == CONFIG.INSPECT_BYPASS_SECRET_KEY
+    
+    if CONFIG.INSPECT_PROTECTION_ENABLED and not inspect_bypass then
+        -- Get protection JavaScript and CSS
+        local protection_js = [[
+<script>
+(function() {
+    'use strict';
+    
+    // Disable right-click context menu
+    document.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        return false;
+    });
+    
+    // Disable keyboard shortcuts
+    document.addEventListener('keydown', function(e) {
+        // F12 key
+        if (e.keyCode === 123) {
+            e.preventDefault();
+            return false;
+        }
+        
+        // Ctrl+Shift+I (Chrome DevTools)
+        if (e.ctrlKey && e.shiftKey && e.keyCode === 73) {
+            e.preventDefault();
+            return false;
+        }
+        
+        // Ctrl+Shift+J (Chrome Console)
+        if (e.ctrlKey && e.shiftKey && e.keyCode === 74) {
+            e.preventDefault();
+            return false;
+        }
+        
+        // Ctrl+U (View Source)
+        if (e.ctrlKey && e.keyCode === 85) {
+            e.preventDefault();
+            return false;
+        }
+        
+        // Ctrl+Shift+C (Chrome Elements)
+        if (e.ctrlKey && e.shiftKey && e.keyCode === 67) {
+            e.preventDefault();
+            return false;
+        }
+        
+        // F5 and Ctrl+R (Refresh)
+        if (e.keyCode === 116 || (e.ctrlKey && e.keyCode === 82)) {
+            e.preventDefault();
+            return false;
+        }
+    });
+    
+    // Detect developer tools
+    function detectDevTools() {
+        const threshold = 160;
+        const widthThreshold = window.outerWidth - window.innerWidth > threshold;
+        const heightThreshold = window.outerHeight - window.innerHeight > threshold;
+        
+        if (widthThreshold || heightThreshold) {
+            document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Developer tools are not allowed on this site.</p></div>';
+            return true;
+        }
+        return false;
+    }
+    
+    // Continuous monitoring
+    setInterval(detectDevTools, 1000);
+    
+    // Additional detection methods
+    let devtools = {
+        open: false,
+        orientation: null
+    };
+    
+    setInterval(() => {
+        if (window.outerHeight - window.innerHeight > 200 || window.outerWidth - window.innerWidth > 200) {
+            if (!devtools.open) {
+                devtools.open = true;
+                document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Developer tools detected. Access blocked.</p></div>';
+            }
+        } else {
+            devtools.open = false;
+        }
+    }, 500);
+    
+    // Console detection
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    
+    console.log = function() {
+        document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
+        return originalLog.apply(console, arguments);
+    };
+    
+    console.warn = function() {
+        document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
+        return originalWarn.apply(console, arguments);
+    };
+    
+    console.error = function() {
+        document.body.innerHTML = '<div style="text-align:center;padding:50px;font-family:Arial,sans-serif;"><h1>Access Denied</h1><p>Console access is not allowed.</p></div>';
+        return originalError.apply(console, arguments);
+    };
+    
+    // Disable text selection
+    document.addEventListener('selectstart', function(e) {
+        e.preventDefault();
+        return false;
+    });
+    
+    // Disable drag and drop
+    document.addEventListener('dragstart', function(e) {
+        e.preventDefault();
+        return false;
+    });
+    
+})();
+</script>
+]]
+        
+        local protection_css = [[
+<style>
+/* Disable text selection */
+* {
+    -webkit-user-select: none !important;
+    -moz-user-select: none !important;
+    -ms-user-select: none !important;
+    user-select: none !important;
+    -webkit-touch-callout: none !important;
+    -webkit-tap-highlight-color: transparent !important;
+}
+
+/* Hide elements when devtools are open */
+@media screen and (max-width: 100px) {
+    body * {
+        display: none !important;
+    }
+    body::after {
+        content: "Access Denied - Developer tools detected";
+        display: block !important;
+        text-align: center;
+        padding: 50px;
+        font-family: Arial, sans-serif;
+    }
+}
+
+/* Additional protection */
+body {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    -khtml-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+}
+
+/* Disable images drag */
+img {
+    -webkit-user-drag: none;
+    -khtml-user-drag: none;
+    -moz-user-drag: none;
+    -o-user-drag: none;
+    user-drag: none;
+    pointer-events: none;
+}
+
+/* Hide scrollbars when devtools are open */
+@media screen and (max-height: 100px) {
+    body * {
+        display: none !important;
+    }
+    body::after {
+        content: "Access Denied - Developer tools detected";
+        display: block !important;
+        text-align: center;
+        padding: 50px;
+        font-family: Arial, sans-serif;
+    }
+}
+</style>
+]]
+        
+        -- Inject protection into the HTML content
+        -- Find the </head> tag and insert protection before it
+        local head_end = string.find(content, "</head>")
+        if head_end then
+            local before_head = string.sub(content, 1, head_end - 1)
+            local after_head = string.sub(content, head_end)
+            content = before_head .. protection_css .. protection_js .. after_head
+        else
+            -- If no </head> tag found, insert at the beginning
+            content = protection_css .. protection_js .. content
+        end
+    end
     
     applet:set_status(200)
     applet:add_header("content-type", "text/html")
